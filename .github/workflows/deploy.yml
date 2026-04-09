@@ -18,20 +18,13 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - uses: actions/checkout@v4
-
       - name: Preparar site
         run: |
           mkdir -p _site
-          if [ -f dashboard_final.html ]; then
-            cp dashboard_final.html _site/index.html
-          elif [ -f dashboard_completo.html ]; then
-            cp dashboard_completo.html _site/index.html
-          fi
+          cp index.html _site/index.html
           cp dados/dados_eta.json _site/dados_eta.json 2>/dev/null || echo "[]" > _site/dados_eta.json
-
       - uses: actions/configure-pages@v4
       - uses: actions/upload-pages-artifact@v3
         with:
           path: _site
-      - id: deployment
-        uses: actions/deploy-pages@v4
+      - uses: actions/deploy-pages@v4
