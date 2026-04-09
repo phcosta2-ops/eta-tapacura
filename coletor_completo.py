@@ -457,10 +457,10 @@ def processar(R):
         ultimo_calc = serie_unica[-1]["v"] if serie_unica else None
         erro = abs(ultimo_calc - valor_real) if (ultimo_calc is not None and valor_real is not None) else None
 
+        uc_str = f"{ultimo_calc:.4f}" if ultimo_calc is not None else "N/A"
+        er_str = f"{erro:.4f}" if erro is not None else "N/A"
         log.info(f"  {param}: {len(serie_unica)} pontos, "
-                 f"ultimo_calc={ultimo_calc:.4f if ultimo_calc else 'N/A'}, "
-                 f"real={valor_real}, "
-                 f"erro={erro:.4f if erro is not None else 'N/A'}")
+                 f"ultimo_calc={uc_str}, real={valor_real}, erro={er_str}")
 
         # Se o erro ainda for grande, ajustar com offset simples
         if erro is not None and valor_real is not None and ultimo_calc is not None:
@@ -481,7 +481,8 @@ def processar(R):
 
                 # Recalcular ultimo
                 ultimo_final = serie_unica[-1]["v"] if serie_unica else None
-                log.info(f"  {param}: apos correcao, ultimo={ultimo_final:.4f if ultimo_final else 'N/A'}")
+                uf_str = f"{ultimo_final:.4f}" if ultimo_final is not None else "N/A"
+                log.info(f"  {param}: apos correcao, ultimo={uf_str}")
 
         coleta["series"][param] = {
             "num_pontos": len(serie_unica),
