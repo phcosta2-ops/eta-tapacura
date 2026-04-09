@@ -1,0 +1,631 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ETA Tapacurá - Dashboard Completo</title>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;600;700&family=DM+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #06090f;
+    --bg-card: #0d1320;
+    --bg-card-hover: #131d2e;
+    --border: #1a2744;
+    --text: #e2e8f0;
+    --text-sec: #7b8ba5;
+    --text-dim: #3d4f6b;
+    --cloro: #f59e0b;
+    --cor: #eab308;
+    --turbidez: #22c55e;
+    --ph: #a78bfa;
+    --danger: #ef4444;
+    --success: #22c55e;
+    --warning: #f59e0b;
+  }
+
+  * { margin:0; padding:0; box-sizing:border-box; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'DM Sans', sans-serif;
+    min-height: 100vh;
+  }
+
+  body::before {
+    content:'';
+    position:fixed; inset:0;
+    background:
+      radial-gradient(ellipse at 20% 0%, rgba(245,158,11,0.03) 0%, transparent 50%),
+      radial-gradient(ellipse at 80% 100%, rgba(167,139,250,0.03) 0%, transparent 50%);
+    pointer-events:none; z-index:0;
+  }
+
+  .container { max-width:1440px; margin:0 auto; padding:20px 24px; position:relative; z-index:1; }
+
+  /* HEADER */
+  .header {
+    display:flex; align-items:center; justify-content:space-between;
+    margin-bottom:28px; padding-bottom:16px; border-bottom:1px solid var(--border);
+  }
+  .header h1 {
+    font-size:24px; font-weight:700; letter-spacing:-0.5px;
+    background:linear-gradient(135deg, #e2e8f0, #7b8ba5);
+    -webkit-background-clip:text; -webkit-text-fill-color:transparent;
+  }
+  .header .sub { font-size:12px; color:var(--text-dim); font-family:'JetBrains Mono',monospace; margin-top:2px; }
+  .header-right { display:flex; align-items:center; gap:14px; }
+  .badge {
+    display:flex; align-items:center; gap:6px; padding:6px 14px;
+    border-radius:16px; font-size:12px; font-weight:500;
+    background:rgba(34,197,94,0.08); border:1px solid rgba(34,197,94,0.15); color:var(--success);
+  }
+  .badge .dot { width:7px; height:7px; border-radius:50%; background:var(--success); animation:pulse 2s infinite; }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.5} }
+  .timestamp { font-size:12px; color:var(--text-sec); font-family:'JetBrains Mono',monospace; }
+
+  /* METRICS */
+  .metrics { display:grid; grid-template-columns:repeat(4,1fr); gap:16px; margin-bottom:24px; }
+  .metric {
+    background:var(--bg-card); border:1px solid var(--border); border-radius:14px;
+    padding:20px; position:relative; overflow:hidden; transition:all .2s;
+  }
+  .metric:hover { background:var(--bg-card-hover); transform:translateY(-1px); }
+  .metric::after { content:''; position:absolute; top:0; left:0; right:0; height:2px; }
+  .metric.cloro::after { background:linear-gradient(90deg,var(--cloro),transparent); }
+  .metric.cor::after { background:linear-gradient(90deg,var(--cor),transparent); }
+  .metric.turbidez::after { background:linear-gradient(90deg,var(--turbidez),transparent); }
+  .metric.ph::after { background:linear-gradient(90deg,var(--ph),transparent); }
+  .metric-label { font-size:11px; font-weight:600; text-transform:uppercase; letter-spacing:1.5px; color:var(--text-sec); margin-bottom:6px; }
+  .metric-val { font-family:'JetBrains Mono',monospace; font-size:36px; font-weight:700; line-height:1; }
+  .metric.cloro .metric-val { color:var(--cloro); }
+  .metric.cor .metric-val { color:var(--cor); }
+  .metric.turbidez .metric-val { color:var(--turbidez); }
+  .metric.ph .metric-val { color:var(--ph); }
+  .metric-unit { font-size:12px; color:var(--text-dim); font-family:'JetBrains Mono',monospace; margin-top:2px; }
+  .metric-tag {
+    position:absolute; top:16px; right:16px; font-size:10px; padding:3px 8px;
+    border-radius:8px; font-weight:600; text-transform:uppercase; letter-spacing:.5px;
+  }
+  .metric-tag.ok { background:rgba(34,197,94,0.1); color:var(--success); }
+  .metric-tag.alerta { background:rgba(245,158,11,0.1); color:var(--warning); }
+  .metric-tag.critico { background:rgba(239,68,68,0.1); color:var(--danger); }
+  .metric-info { font-size:11px; color:var(--text-dim); margin-top:8px; font-family:'JetBrains Mono',monospace; }
+
+  /* CHARTS */
+  .charts { display:grid; grid-template-columns:1fr 1fr; gap:16px; margin-bottom:24px; }
+  .chart-card {
+    background:var(--bg-card); border:1px solid var(--border); border-radius:14px; padding:20px;
+  }
+  .chart-header { display:flex; align-items:center; gap:8px; margin-bottom:12px; }
+  .chart-header .dot { width:8px; height:8px; border-radius:50%; }
+  .chart-header span { font-size:13px; font-weight:500; color:var(--text-sec); }
+  .chart-header .pontos { margin-left:auto; font-size:11px; color:var(--text-dim); font-family:'JetBrains Mono',monospace; }
+  canvas { width:100%!important; }
+
+  /* TABLE */
+  .table-card {
+    background:var(--bg-card); border:1px solid var(--border); border-radius:14px;
+    padding:20px; overflow-x:auto; margin-bottom:24px;
+  }
+  .table-card h2 { font-size:14px; font-weight:600; color:var(--text-sec); margin-bottom:14px; }
+  table { width:100%; border-collapse:collapse; font-family:'JetBrains Mono',monospace; font-size:12px; }
+  th { text-align:left; padding:8px 14px; color:var(--text-dim); font-weight:500; font-size:10px; text-transform:uppercase; letter-spacing:1px; border-bottom:1px solid var(--border); }
+  td { padding:8px 14px; color:var(--text); border-bottom:1px solid rgba(26,39,68,.4); }
+  tr:hover td { background:rgba(255,255,255,.015); }
+
+  /* ANOMALY SECTION */
+  .anomalias-card {
+    background:var(--bg-card); border:1px solid var(--border); border-radius:14px;
+    padding:20px; margin-bottom:24px;
+  }
+  .anomalias-card h2 { font-size:14px; font-weight:600; color:var(--text-sec); margin-bottom:14px; }
+  .anomalia-item {
+    display:flex; align-items:center; gap:12px; padding:10px 14px;
+    border-radius:10px; margin-bottom:6px; font-size:13px;
+  }
+  .anomalia-item.danger { background:rgba(239,68,68,.06); border:1px solid rgba(239,68,68,.12); color:#fca5a5; }
+  .anomalia-item.warning { background:rgba(245,158,11,.06); border:1px solid rgba(245,158,11,.12); color:#fcd34d; }
+  .anomalia-item .icon { font-size:16px; }
+  .anomalia-item .time { margin-left:auto; font-size:11px; color:var(--text-dim); font-family:'JetBrains Mono',monospace; }
+  .no-anomalias { color:var(--text-dim); font-size:13px; padding:10px; }
+
+  /* FILE DROP */
+  .file-drop {
+    background:var(--bg-card); border:2px dashed var(--border); border-radius:14px;
+    padding:40px; text-align:center; cursor:pointer; transition:all .2s; margin-bottom:24px;
+  }
+  .file-drop:hover { border-color:var(--text-dim); }
+  .file-drop h3 { font-size:15px; margin-bottom:6px; }
+  .file-drop p { font-size:12px; color:var(--text-dim); }
+  #fileInput { display:none; }
+
+  .demo-btn {
+    background:transparent; border:1px solid var(--border); color:var(--text-dim);
+    padding:6px 16px; border-radius:8px; cursor:pointer; font-size:11px;
+    font-family:'JetBrains Mono',monospace; transition:all .2s;
+  }
+  .demo-btn:hover { border-color:var(--text-sec); color:var(--text-sec); }
+
+  @media(max-width:900px) { .metrics{grid-template-columns:repeat(2,1fr);} .charts{grid-template-columns:1fr;} }
+  @media(max-width:500px) { .metrics{grid-template-columns:1fr;} .container{padding:12px;} }
+
+  .fade-in { opacity:0; animation:fadeIn .4s ease forwards; }
+  @keyframes fadeIn { to{opacity:1;} }
+</style>
+</head>
+<body>
+<div class="container">
+  <div class="header">
+    <div>
+      <h1>ETA Tapacurá</h1>
+      <div class="sub">COMPESA — Instrumentação Analítica</div>
+    </div>
+    <div class="header-right">
+      <div class="badge" id="badge"><div class="dot"></div><span id="statusTxt">Aguardando dados</span></div>
+      <div class="timestamp" id="tsTxt">--</div>
+    </div>
+  </div>
+
+  <div class="file-drop" id="fileDrop" onclick="document.getElementById('fileInput').click()">
+    <h3>📂 Carregar dados_eta.json</h3>
+    <p>Clique ou arraste o arquivo · Ou coloque o JSON na mesma pasta e abra via servidor</p>
+    <input type="file" id="fileInput" accept=".json" onchange="carregarArquivo(event)">
+  </div>
+
+  <div id="app" style="display:none">
+    <!-- Anomalias -->
+    <div class="anomalias-card fade-in" id="anomaliasCard">
+      <h2>⚡ Anomalias Detectadas</h2>
+      <div id="anomaliasLista"><div class="no-anomalias">Nenhuma anomalia encontrada</div></div>
+    </div>
+
+    <!-- Metrics -->
+    <div class="metrics">
+      <div class="metric cloro fade-in" style="animation-delay:.1s">
+        <div class="metric-label">Cloro Residual</div>
+        <div class="metric-val" id="vCloro">--</div>
+        <div class="metric-unit">ppm</div>
+        <div class="metric-tag" id="tCloro">--</div>
+        <div class="metric-info" id="iCloro"></div>
+      </div>
+      <div class="metric cor fade-in" style="animation-delay:.15s">
+        <div class="metric-label">Cor</div>
+        <div class="metric-val" id="vCor">--</div>
+        <div class="metric-unit">uC</div>
+        <div class="metric-tag" id="tCor">--</div>
+        <div class="metric-info" id="iCor"></div>
+      </div>
+      <div class="metric turbidez fade-in" style="animation-delay:.2s">
+        <div class="metric-label">Turbidez</div>
+        <div class="metric-val" id="vTurbidez">--</div>
+        <div class="metric-unit">NTU</div>
+        <div class="metric-tag" id="tTurbidez">--</div>
+        <div class="metric-info" id="iTurbidez"></div>
+      </div>
+      <div class="metric ph fade-in" style="animation-delay:.25s">
+        <div class="metric-label">pH</div>
+        <div class="metric-val" id="vPH">--</div>
+        <div class="metric-unit">pH</div>
+        <div class="metric-tag" id="tPH">--</div>
+        <div class="metric-info" id="iPH"></div>
+      </div>
+    </div>
+
+    <!-- Charts -->
+    <div class="charts">
+      <div class="chart-card fade-in">
+        <div class="chart-header"><span class="dot" style="background:var(--cloro)"></span><span>Cloro Residual (ppm)</span><span class="pontos" id="pCloro"></span></div>
+        <canvas id="cCloro" height="220"></canvas>
+      </div>
+      <div class="chart-card fade-in">
+        <div class="chart-header"><span class="dot" style="background:var(--cor)"></span><span>Cor (uC)</span><span class="pontos" id="pCor"></span></div>
+        <canvas id="cCor" height="220"></canvas>
+      </div>
+      <div class="chart-card fade-in">
+        <div class="chart-header"><span class="dot" style="background:var(--turbidez)"></span><span>Turbidez (NTU)</span><span class="pontos" id="pTurbidez"></span></div>
+        <canvas id="cTurbidez" height="220"></canvas>
+      </div>
+      <div class="chart-card fade-in">
+        <div class="chart-header"><span class="dot" style="background:var(--ph)"></span><span>pH</span><span class="pontos" id="pPH"></span></div>
+        <canvas id="cPH" height="220"></canvas>
+      </div>
+    </div>
+
+    <!-- Table -->
+    <div class="table-card fade-in">
+      <h2>Últimas Coletas</h2>
+      <table>
+        <thead><tr><th>Data/Hora</th><th>Cloro (ppm)</th><th>Cor (uC)</th><th>Turbidez (NTU)</th><th>pH</th><th>Pontos</th></tr></thead>
+        <tbody id="tabela"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div style="text-align:center;margin-top:16px;">
+    <button class="demo-btn" onclick="carregarDemo()">Ver demo com dados simulados</button>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<script>
+const LIMITES = {
+  cloro: { min:.2, max:5, imin:.5, imax:2 },
+  cor: { max:15 },
+  turbidez: { max:.5, alerta:1 },
+  ph: { min:6, max:9.5, imin:6.5, imax:8.5 }
+};
+
+let charts = {};
+
+// Drag & drop
+const fd = document.getElementById('fileDrop');
+fd.addEventListener('dragover', e => { e.preventDefault(); fd.style.borderColor='#7b8ba5'; });
+fd.addEventListener('dragleave', () => fd.style.borderColor='');
+fd.addEventListener('drop', e => { e.preventDefault(); fd.style.borderColor=''; const f=e.dataTransfer.files[0]; if(f)processFile(f); });
+
+function carregarArquivo(e) { if(e.target.files[0]) processFile(e.target.files[0]); }
+
+function processFile(file) {
+  const r = new FileReader();
+  r.onload = e => {
+    try {
+      const data = JSON.parse(e.target.result);
+      if (Array.isArray(data)) renderizar(data);
+      else alert('Formato invalido');
+    } catch(err) { alert('Erro: ' + err.message); }
+  };
+  r.readAsText(file);
+}
+
+function renderizar(coletas) {
+  document.getElementById('fileDrop').style.display = 'none';
+  document.getElementById('app').style.display = 'block';
+
+  const ultima = coletas[coletas.length - 1];
+  const dt = new Date(ultima.timestamp);
+  document.getElementById('tsTxt').textContent = dt.toLocaleString('pt-BR');
+  document.getElementById('statusTxt').textContent = 'Online';
+
+  // =====================
+  // EXTRAIR SERIES COMPLETAS DE TODAS AS COLETAS
+  // =====================
+  const seriesCompletas = { cloro:[], cor:[], turbidez:[], ph:[] };
+
+  coletas.forEach(coleta => {
+    // Tipo "completa" - tem series com muitos pontos
+    if (coleta.series) {
+      Object.entries(coleta.series).forEach(([key, serie]) => {
+        const dados = serie.dados || [];
+        const param = identificarParam(key);
+        if (param && dados.length > 0) {
+          dados.forEach(d => {
+            if (d.v !== null && d.v !== undefined && !isNaN(d.v)) {
+              seriesCompletas[param].push({
+                t: d.t ? new Date(d.t) : new Date(coleta.timestamp),
+                v: d.v
+              });
+            }
+          });
+        }
+      });
+    }
+
+    // Tipo simples - so valor atual
+    if (coleta.valores_atuais) {
+      const va = coleta.valores_atuais;
+      const t = new Date(coleta.timestamp);
+      if (va.cloro_ppm != null) seriesCompletas.cloro.push({ t, v:va.cloro_ppm });
+      if (va.cor_uc != null) seriesCompletas.cor.push({ t, v:va.cor_uc });
+      if (va.turbidez_ntu != null) seriesCompletas.turbidez.push({ t, v:va.turbidez_ntu });
+      if (va.ph != null) seriesCompletas.ph.push({ t, v:va.ph });
+    }
+
+    // Formato antigo (compatibilidade)
+    if (coleta.cloro_ppm !== undefined) {
+      const t = new Date(coleta.timestamp);
+      if (coleta.cloro_ppm != null) seriesCompletas.cloro.push({ t, v:coleta.cloro_ppm });
+      if (coleta.cor_uc != null) seriesCompletas.cor.push({ t, v:coleta.cor_uc });
+      if (coleta.turbidez_ntu != null) seriesCompletas.turbidez.push({ t, v:coleta.turbidez_ntu });
+      if (coleta.ph != null) seriesCompletas.ph.push({ t, v:coleta.ph });
+    }
+  });
+
+  // Ordenar por tempo e remover duplicatas
+  Object.keys(seriesCompletas).forEach(k => {
+    seriesCompletas[k].sort((a,b) => a.t - b.t);
+    // Remover duplicatas (mesmo timestamp)
+    const seen = new Set();
+    seriesCompletas[k] = seriesCompletas[k].filter(d => {
+      const key = d.t.getTime() + '_' + d.v;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+  });
+
+  // =====================
+  // VALORES ATUAIS
+  // =====================
+  const ultimoValor = p => {
+    const s = seriesCompletas[p];
+    return s.length > 0 ? s[s.length-1].v : null;
+  };
+
+  atualizarMetrica('Cloro', ultimoValor('cloro'), seriesCompletas.cloro, LIMITES.cloro);
+  atualizarMetrica('Cor', ultimoValor('cor'), seriesCompletas.cor, LIMITES.cor);
+  atualizarMetrica('Turbidez', ultimoValor('turbidez'), seriesCompletas.turbidez, LIMITES.turbidez);
+  atualizarMetrica('PH', ultimoValor('ph'), seriesCompletas.ph, LIMITES.ph);
+
+  // =====================
+  // GRAFICOS COM TODOS OS PONTOS
+  // =====================
+  criarGrafico('cCloro', seriesCompletas.cloro, '#f59e0b', 'pCloro', LIMITES.cloro);
+  criarGrafico('cCor', seriesCompletas.cor, '#eab308', 'pCor', LIMITES.cor);
+  criarGrafico('cTurbidez', seriesCompletas.turbidez, '#22c55e', 'pTurbidez', LIMITES.turbidez);
+  criarGrafico('cPH', seriesCompletas.ph, '#a78bfa', 'pPH', LIMITES.ph);
+
+  // =====================
+  // DETECTAR ANOMALIAS
+  // =====================
+  const anomalias = [];
+  detectarAnomalias(seriesCompletas.cloro, 'Cloro', 'ppm', LIMITES.cloro, anomalias);
+  detectarAnomalias(seriesCompletas.cor, 'Cor', 'uC', LIMITES.cor, anomalias);
+  detectarAnomalias(seriesCompletas.turbidez, 'Turbidez', 'NTU', LIMITES.turbidez, anomalias);
+  detectarAnomalias(seriesCompletas.ph, 'pH', '', LIMITES.ph, anomalias);
+
+  const listaEl = document.getElementById('anomaliasLista');
+  if (anomalias.length === 0) {
+    listaEl.innerHTML = '<div class="no-anomalias">✅ Nenhuma anomalia detectada no período</div>';
+  } else {
+    anomalias.sort((a,b) => b.t - a.t);
+    listaEl.innerHTML = anomalias.slice(0, 20).map(a => `
+      <div class="anomalia-item ${a.nivel}">
+        <span class="icon">${a.nivel === 'danger' ? '🔴' : '🟡'}</span>
+        <span>${a.msg}</span>
+        <span class="time">${a.t.toLocaleString('pt-BR')}</span>
+      </div>
+    `).join('');
+  }
+
+  // =====================
+  // TABELA DE COLETAS
+  // =====================
+  const tbody = document.getElementById('tabela');
+  tbody.innerHTML = '';
+  [...coletas].reverse().slice(0, 30).forEach(c => {
+    const t = new Date(c.timestamp);
+    const va = c.valores_atuais || {};
+    const pontos = Object.values(c.series || {}).reduce((sum, s) => sum + (s.num_pontos || 0), 0);
+    const cl = va.cloro_ppm ?? c.cloro_ppm;
+    const co = va.cor_uc ?? c.cor_uc;
+    const tu = va.turbidez_ntu ?? c.turbidez_ntu;
+    const ph = va.ph ?? c.ph;
+    tbody.innerHTML += `<tr>
+      <td>${t.toLocaleString('pt-BR')}</td>
+      <td>${fmt(cl)}</td><td>${fmt(co)}</td><td>${fmt(tu)}</td><td>${fmt(ph)}</td>
+      <td>${pontos > 0 ? pontos + ' pts' : '—'}</td>
+    </tr>`;
+  });
+}
+
+function identificarParam(key) {
+  const k = key.toLowerCase();
+  if (k.includes('cloro') || k.includes('cl2') || k.includes('residual')) return 'cloro';
+  if ((k.includes('cor') && !k.includes('corpo')) || k.includes('_uc')) return 'cor';
+  if (k.includes('turb') || k.includes('ntu')) return 'turbidez';
+  if (k.includes('ph') && !k.includes('phone')) return 'ph';
+  return null;
+}
+
+function atualizarMetrica(nome, valor, serie, limites) {
+  const vEl = document.getElementById('v' + nome);
+  const tEl = document.getElementById('t' + nome);
+  const iEl = document.getElementById('i' + nome);
+
+  if (valor == null) { vEl.textContent = '--'; tEl.textContent = 'S/ DADOS'; tEl.className = 'metric-tag'; return; }
+
+  vEl.textContent = valor.toFixed(2).replace('.', ',');
+
+  // Status
+  let st = 'ok', tx = 'NORMAL';
+  if (nome === 'Cloro') {
+    if (valor < limites.min || valor > limites.max) { st='critico'; tx='FORA'; }
+    else if (valor < limites.imin || valor > limites.imax) { st='alerta'; tx='ATENÇÃO'; }
+  } else if (nome === 'Cor') {
+    if (valor > limites.max) { st='critico'; tx='ACIMA'; }
+    else if (valor > limites.max * 0.8) { st='alerta'; tx='ATENÇÃO'; }
+  } else if (nome === 'Turbidez') {
+    if (valor > limites.alerta) { st='critico'; tx='ACIMA'; }
+    else if (valor > limites.max) { st='alerta'; tx='ATENÇÃO'; }
+  } else if (nome === 'PH') {
+    if (valor < limites.min || valor > limites.max) { st='critico'; tx='FORA'; }
+    else if (valor < limites.imin || valor > limites.imax) { st='alerta'; tx='ATENÇÃO'; }
+  }
+  tEl.textContent = tx;
+  tEl.className = 'metric-tag ' + st;
+
+  // Info (min/max/media da serie)
+  if (serie.length > 1) {
+    const vals = serie.map(d => d.v);
+    const min = Math.min(...vals).toFixed(2).replace('.',',');
+    const max = Math.max(...vals).toFixed(2).replace('.',',');
+    const avg = (vals.reduce((a,b)=>a+b,0)/vals.length).toFixed(2).replace('.',',');
+    iEl.textContent = `min ${min} · max ${max} · avg ${avg} · ${serie.length} pts`;
+  }
+}
+
+function criarGrafico(canvasId, serie, cor, pontosElId, limites) {
+  if (charts[canvasId]) charts[canvasId].destroy();
+
+  const el = document.getElementById(pontosElId);
+  if (el) el.textContent = `${serie.length} pontos`;
+
+  if (serie.length === 0) return;
+
+  const labels = serie.map(d => d.t.toLocaleString('pt-BR', {day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'}));
+  const dados = serie.map(d => d.v);
+
+  // Linha de limite
+  const datasets = [{
+    label: 'Valor',
+    data: dados,
+    borderColor: cor,
+    backgroundColor: cor + '15',
+    fill: true,
+    tension: 0.2,
+    pointRadius: serie.length > 200 ? 0 : serie.length > 50 ? 1 : 2,
+    pointHoverRadius: 4,
+    borderWidth: 1.5,
+  }];
+
+  // Adicionar linha de limite max
+  if (limites.max) {
+    datasets.push({
+      label: 'Limite',
+      data: Array(dados.length).fill(limites.max),
+      borderColor: '#ef444466',
+      borderDash: [5, 5],
+      borderWidth: 1,
+      pointRadius: 0,
+      fill: false,
+    });
+  }
+
+  const ctx = document.getElementById(canvasId).getContext('2d');
+  charts[canvasId] = new Chart(ctx, {
+    type: 'line',
+    data: { labels, datasets },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          backgroundColor:'#131d2e', titleColor:'#e2e8f0', bodyColor:'#e2e8f0',
+          borderColor:cor, borderWidth:1, cornerRadius:8, padding:10,
+          callbacks: {
+            label: ctx => ctx.dataset.label === 'Limite' ? null : `${ctx.parsed.y.toFixed(3)}`
+          }
+        }
+      },
+      scales: {
+        x: { ticks:{ color:'#3d4f6b', font:{family:'JetBrains Mono',size:9}, maxTicksLimit:8 }, grid:{color:'rgba(26,39,68,.4)'} },
+        y: { ticks:{ color:'#3d4f6b', font:{family:'JetBrains Mono',size:9} }, grid:{color:'rgba(26,39,68,.4)'} }
+      },
+      interaction: { intersect:false, mode:'index' }
+    }
+  });
+}
+
+function detectarAnomalias(serie, nome, unidade, limites, anomalias) {
+  if (serie.length < 3) return;
+
+  // 1. Fora dos limites
+  serie.forEach(d => {
+    if (limites.max && d.v > limites.max) {
+      anomalias.push({ t:d.t, nivel:'danger', msg:`${nome} acima do limite: ${d.v.toFixed(2)} ${unidade} (max: ${limites.max})` });
+    }
+    if (limites.min && d.v < limites.min) {
+      anomalias.push({ t:d.t, nivel:'danger', msg:`${nome} abaixo do limite: ${d.v.toFixed(2)} ${unidade} (min: ${limites.min})` });
+    }
+    if (limites.alerta && d.v > limites.alerta) {
+      anomalias.push({ t:d.t, nivel:'warning', msg:`${nome} em alerta: ${d.v.toFixed(2)} ${unidade}` });
+    }
+  });
+
+  // 2. Variacao brusca (spike detection)
+  for (let i = 2; i < serie.length; i++) {
+    const prev = serie[i-1].v;
+    const curr = serie[i].v;
+    const diff = Math.abs(curr - prev);
+    const media = (Math.abs(prev) + Math.abs(curr)) / 2;
+
+    // Se variou mais de 50% do valor medio de forma abrupta
+    if (media > 0 && diff / media > 0.5 && diff > 0.5) {
+      anomalias.push({
+        t: serie[i].t,
+        nivel: 'warning',
+        msg: `${nome} variação brusca: ${prev.toFixed(2)} → ${curr.toFixed(2)} ${unidade}`
+      });
+    }
+  }
+
+  // Limitar a 5 anomalias por parametro (evitar flood)
+  // Ja esta limitado a 20 no total na renderizacao
+}
+
+function fmt(v) {
+  if (v == null) return '--';
+  return v.toFixed(2).replace('.', ',');
+}
+
+// DEMO
+function carregarDemo() {
+  const coletas = [];
+  const agora = new Date();
+
+  // Simular 6 coletas de 2h, cada uma com ~480 pontos (8h de dados por minuto)
+  for (let c = 5; c >= 0; c--) {
+    const tsColeta = new Date(agora - c * 7200000);
+    const series = {};
+
+    ['cloro_ppm', 'cor_uc', 'turbidez_ntu', 'ph'].forEach(param => {
+      const dados = [];
+      const base = param === 'cloro_ppm' ? 2.2 : param === 'cor_uc' ? 14 : param === 'turbidez_ntu' ? 0.4 : 5.7;
+      const noise = param === 'cloro_ppm' ? 0.3 : param === 'cor_uc' ? 3 : param === 'turbidez_ntu' ? 0.15 : 0.2;
+
+      for (let m = 0; m < 480; m++) {
+        const t = new Date(tsColeta.getTime() - (480 - m) * 60000);
+        let v = base + (Math.random() - 0.5) * noise;
+
+        // Simular spike anomalo
+        if (m === 200 + Math.floor(c * 30) && param === 'turbidez_ntu') v += 8;
+        if (m === 300 && c === 2 && param === 'cor_uc') v += 30;
+
+        dados.push({ t: t.toISOString(), v: Math.max(0, v) });
+      }
+
+      series[param] = { num_pontos: dados.length, dados };
+    });
+
+    const lastCloro = series.cloro_ppm.dados.slice(-1)[0];
+    const lastCor = series.cor_uc.dados.slice(-1)[0];
+    const lastTurb = series.turbidez_ntu.dados.slice(-1)[0];
+    const lastPH = series.ph.dados.slice(-1)[0];
+
+    coletas.push({
+      timestamp: tsColeta.toISOString(),
+      tipo: 'completa',
+      valores_atuais: {
+        cloro_ppm: lastCloro.v,
+        cor_uc: lastCor.v,
+        turbidez_ntu: lastTurb.v,
+        ph: lastPH.v
+      },
+      series
+    });
+  }
+
+  renderizar(coletas);
+}
+
+// Auto-load
+async function autoLoad() {
+  try {
+    const r = await fetch('dados_eta.json?t=' + Date.now());
+    if (r.ok) {
+      const d = await r.json();
+      if (Array.isArray(d) && d.length > 0) {
+        renderizar(d);
+        setInterval(async () => {
+          try { const r2 = await fetch('dados_eta.json?t='+Date.now()); if(r2.ok){renderizar(await r2.json());} } catch(e){}
+        }, 300000);
+      }
+    }
+  } catch(e) {}
+}
+autoLoad();
+</script>
+</body>
+</html>
