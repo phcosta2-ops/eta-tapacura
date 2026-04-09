@@ -1,0 +1,46 @@
+yamlname: Deploy Dashboard no GitHub Pages
+
+on:
+  push:
+    branches: [ main ]
+
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: "pages"
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Preparar arquivos do site
+        run: |
+          mkdir -p _site
+          cp dashboard_completo.html _site/index.html
+          cp -r dados/ _site/dados/ 2>/dev/null || mkdir -p _site/dados
+          cp dados/dados_eta.json _site/dados_eta.json 2>/dev/null || echo "[]" > _site/dados_eta.json
+
+      - name: Setup Pages
+        uses: actions/configure-pages@v4
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: '_site'
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
