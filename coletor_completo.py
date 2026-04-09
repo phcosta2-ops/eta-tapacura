@@ -1,21 +1,17 @@
 """
 =============================================================
-COLETOR ETA TAPACURA - V3 (CALIBRADO COM TEXTOS)
+COLETOR ETA TAPACURA - V4 (CALIBRACAO REFINADA)
 =============================================================
-Usa os valores grandes da tela (fontSize=80px) como ancora
-pra calibrar a conversao pixel->valor dos graficos SVG.
+Corrige a conversao pixel->valor para graficos onde os valores
+ficam perto do fundo (Cor escala 0-250 com valor ~6,
+Turbidez escala 0-20 com valor ~0.4).
 
-Cores dos GRAFICOS (trace-line):
-  - rgb(224,138,0)   = Cloro Residual (ppm)
-  - rgb(255,240,0)   = Cor (uC)
-  - rgb(60,191,60)   = Turbidez (NTU)
-  - rgb(178,107,255) = pH
+O problema: em SVG, py=0 = topo (valor maximo), py=ph = fundo
+(valor minimo). Mas o plot area tem padding/margem interna,
+entao py nunca chega exatamente a 0 ou ph.
 
-Cores dos TEXTOS (valores grandes):
-  - rgb(255,127,39)  = Cloro
-  - rgb(255,240,0)   = Cor
-  - rgb(34,177,76)   = Turbidez
-  - rgb(163,73,164)  = pH
+Solucao: usar os ticks do eixo Y (que tambem sao posicionados
+em pixels) pra fazer uma calibracao precisa pixel<->valor.
 =============================================================
 """
 
@@ -40,8 +36,6 @@ except ImportError:
     sys.exit(1)
 
 # ============================================================
-# CONFIGURACOES
-# ============================================================
 URL = "https://supervisorio.compesa.com.br/PIVision/#/Displays/704/ETA-TAPACURA--INSTRUMENTACAO-ANALITICA?hidetoolbar&hidesidebar"
 USUARIO = os.environ.get("ETA_USUARIO", "SEU_USUARIO_AQUI")
 SENHA = os.environ.get("ETA_SENHA", "SUA_SENHA_AQUI")
@@ -50,40 +44,35 @@ ARQUIVO_DADOS = "dados/dados_eta.json"
 ARQUIVO_SCREENSHOT = "dados/ultimo_screenshot.png"
 ARQUIVO_DEBUG = "dados/debug_html.txt"
 
-# Mapeamento de cores SVG trace-line -> parametro
 CORES_GRAFICOS = {
-    "rgb(224, 138, 0)":   "cloro_ppm",
-    "rgb(224,138,0)":     "cloro_ppm",
-    "rgb(255, 240, 0)":   "cor_uc",
-    "rgb(255,240,0)":     "cor_uc",
-    "rgb(60, 191, 60)":   "turbidez_ntu",
-    "rgb(60,191,60)":     "turbidez_ntu",
+    "rgb(224, 138, 0)": "cloro_ppm",
+    "rgb(224,138,0)": "cloro_ppm",
+    "rgb(255, 240, 0)": "cor_uc",
+    "rgb(255,240,0)": "cor_uc",
+    "rgb(60, 191, 60)": "turbidez_ntu",
+    "rgb(60,191,60)": "turbidez_ntu",
     "rgb(178, 107, 255)": "ph",
-    "rgb(178,107,255)":   "ph",
+    "rgb(178,107,255)": "ph",
 }
 
-# Mapeamento de cores dos textos grandes -> parametro
 CORES_TEXTOS = {
-    "rgb(255, 127, 39)":  "cloro_ppm",
-    "rgb(255,127,39)":    "cloro_ppm",
-    "rgb(255, 240, 0)":   "cor_uc",
-    "rgb(255,240,0)":     "cor_uc",
-    "rgb(34, 177, 76)":   "turbidez_ntu",
-    "rgb(34,177,76)":     "turbidez_ntu",
-    "rgb(163, 73, 164)":  "ph",
-    "rgb(163,73,164)":    "ph",
+    "rgb(255, 127, 39)": "cloro_ppm",
+    "rgb(255,127,39)": "cloro_ppm",
+    "rgb(255, 240, 0)": "cor_uc",
+    "rgb(255,240,0)": "cor_uc",
+    "rgb(34, 177, 76)": "turbidez_ntu",
+    "rgb(34,177,76)": "turbidez_ntu",
+    "rgb(163, 73, 164)": "ph",
+    "rgb(163,73,164)": "ph",
 }
 
-# Escalas dos eixos Y (baseado na imagem do PI Vision)
-# Usadas como fallback se nao conseguir calibrar
 ESCALAS_FALLBACK = {
-    "cloro_ppm":     {"min": 0, "max": 6},
-    "cor_uc":        {"min": 0, "max": 250},
-    "turbidez_ntu":  {"min": 0, "max": 20},
-    "ph":            {"min": 0, "max": 7},
+    "cloro_ppm": {"min": 0, "max": 6},
+    "cor_uc": {"min": 0, "max": 250},
+    "turbidez_ntu": {"min": 0, "max": 20},
+    "ph": {"min": 0, "max": 7},
 }
 # ============================================================
-
 
 JS_EXTRAIR = """
 () => {
@@ -91,11 +80,18 @@ JS_EXTRAIR = """
 
     const svgs = document.querySelectorAll('svg');
 
+    // Primeiro, coletar informacoes de TODOS os SVGs
+    const svgInfos = [];
+    svgs.forEach((svg, idx) => {
+        const bbox = svg.getBoundingClientRect();
+        svgInfos.push({ idx, bbox, svg });
+    });
+
+    // Coletar graficos (trace-lines)
     svgs.forEach((svg, idx) => {
         const bbox = svg.getBoundingClientRect();
         if (bbox.width < 100 || bbox.height < 50) return;
 
-        // Buscar apenas trace-lines (dados reais)
         const traces = svg.querySelectorAll('path.trace-line');
         if (traces.length === 0) return;
 
@@ -114,40 +110,27 @@ JS_EXTRAIR = """
             }
 
             if (coords.length > 5) {
-                // Determinar dimensoes do plot
                 let pw = bbox.width, ph = bbox.height;
                 if (vb.length === 4) { pw = vb[2]; ph = vb[3]; }
 
-                // Encontrar min/max Y dos pixels pra este grafico
-                let minPy = Infinity, maxPy = -Infinity;
-                coords.forEach(c => {
-                    if (c.py < minPy) minPy = c.py;
-                    if (c.py > maxPy) maxPy = c.py;
-                });
-
                 R.graficos.push({
-                    svg_idx: idx,
-                    cor: cor,
-                    n: coords.length,
-                    coords: coords,
-                    pw: pw, ph: ph,
-                    minPy: minPy, maxPy: maxPy,
+                    svg_idx: idx, cor: cor, n: coords.length,
+                    coords: coords, pw: pw, ph: ph,
+                    bbox_x: bbox.x, bbox_y: bbox.y,
+                    bbox_w: bbox.width, bbox_h: bbox.height,
                     viewBox: viewBox
                 });
-                R.debug.push('trace ' + cor + ' n=' + coords.length +
-                    ' ph=' + ph.toFixed(0) + ' pyRange=' + minPy.toFixed(1) + '-' + maxPy.toFixed(1));
+                R.debug.push('trace svg' + idx + ' ' + cor + ' n=' + coords.length + ' ph=' + ph.toFixed(0));
             }
         });
-
-        // Eixo Y: pegar textos numericos DENTRO deste SVG e do SVG eixo adjacente
-        // O eixo Y fica no SVG anterior (idx-1)
     });
 
-    // Pegar TODOS os textos de eixo Y
-    // Eles ficam em SVGs separados, adjacentes aos graficos
+    // Coletar eixos Y com posicao PRECISA dos ticks em pixels
+    // Os ticks do eixo Y sao linhas horizontais (gridlines) ou textos
+    // posicionados em Y especificos dentro do SVG do eixo
     svgs.forEach((svg, idx) => {
         const bbox = svg.getBoundingClientRect();
-        // Eixos Y sao SVGs estreitos e altos (width < 50, height > 100)
+        // Eixo Y: estreito e alto
         if (bbox.width > 50 || bbox.height < 80) return;
 
         const textos = svg.querySelectorAll('text');
@@ -155,76 +138,82 @@ JS_EXTRAIR = """
         textos.forEach(t => {
             const v = parseFloat((t.textContent || '').trim().replace(',', '.'));
             if (!isNaN(v)) {
+                // Posicao Y do texto DENTRO do SVG (usar transform ou posicao)
                 const tb = t.getBoundingClientRect();
-                vals.push({ val: v, y: tb.y, absY: tb.y });
+
+                // Posicao relativa ao SVG do eixo
+                const relY = tb.y - bbox.y + tb.height / 2;
+
+                // Tambem pegar a posicao absoluta pra mapear pro SVG do grafico
+                vals.push({
+                    val: v,
+                    absY: tb.y + tb.height / 2,  // centro do texto na tela
+                    relY: relY,
+                    svgY: bbox.y
+                });
             }
         });
 
         if (vals.length >= 2) {
-            vals.sort((a, b) => a.y - b.y);  // topo pra baixo
+            vals.sort((a, b) => a.absY - b.absY);  // topo pra baixo
             R.eixos.push({
                 svg_idx: idx,
-                bbox_y: bbox.y,
-                bbox_h: bbox.height,
+                bbox_x: bbox.x, bbox_y: bbox.y,
+                bbox_w: bbox.width, bbox_h: bbox.height,
                 valores: vals
             });
-            R.debug.push('eixoY svg' + idx + ' vals=' + vals.map(v => v.val).join(','));
+            R.debug.push('eixoY svg' + idx + ' y=' + bbox.y.toFixed(0) +
+                ' h=' + bbox.height.toFixed(0) +
+                ' vals=[' + vals.map(v => v.val + '@' + v.absY.toFixed(0)).join(', ') + ']');
         }
     });
 
-    // Eixo X: timestamps
-    const eixoX = [];
-    svgs.forEach((svg, idx) => {
-        const bbox = svg.getBoundingClientRect();
-        // Eixos X sao SVGs largos e baixos
-        if (bbox.height > 30 || bbox.width < 200) return;
-
-        const textos = svg.querySelectorAll('text');
-        textos.forEach(t => {
-            const txt = (t.textContent || '').trim();
-            if (txt.match(/\\d{2}[:\\/]\\d{2}/)) {
-                const tb = t.getBoundingClientRect();
-                eixoX.push({ texto: txt, x: tb.x });
-            }
-        });
-    });
-    R.debug.push('eixoX timestamps=' + eixoX.length);
-
-    // Textos grandes (valores atuais) - fontSize >= 40px
+    // Textos grandes (valores atuais)
     const all = document.querySelectorAll('*');
     all.forEach(el => {
         if (el.children.length > 2) return;
         const text = (el.innerText || '').trim();
         if (!text || text.length > 15) return;
-
         const fs = parseFloat(window.getComputedStyle(el).fontSize);
-        if (fs < 40) return;  // so textos grandes
-
+        if (fs < 40) return;
         const match = text.match(/^[\\d]+[,.]?[\\d]*$/);
         if (!match) return;
-
         const valor = parseFloat(text.replace(',', '.'));
         if (isNaN(valor) || valor < 0 || valor > 1000) return;
-
         const rect = el.getBoundingClientRect();
-        const color = window.getComputedStyle(el).color;
-
         R.textos.push({
             texto: text, valor: valor,
             x: rect.x, y: rect.y,
-            color: color, fontSize: fs
+            color: window.getComputedStyle(el).color,
+            fontSize: fs
         });
     });
 
-    R.debug.push('textos grandes=' + R.textos.length);
+    R.debug.push('textos=' + R.textos.length);
     return R;
 }
 """
 
 
+def cor_match(cor1, cor2):
+    """Compara duas cores RGB ignorando espacos."""
+    return cor1.replace(" ", "") == cor2.replace(" ", "")
+
+
+def cor_para_param(cor, mapa):
+    """Busca parametro pela cor."""
+    cor = cor.strip()
+    if cor in mapa:
+        return mapa[cor]
+    for c, p in mapa.items():
+        if cor_match(c, cor):
+            return p
+    return None
+
+
 def coletar():
     log.info("=" * 60)
-    log.info("COLETA V3 - ETA TAPACURA")
+    log.info("COLETA V4 - ETA TAPACURA (CALIBRACAO REFINADA)")
     log.info("=" * 60)
 
     Path("dados").mkdir(exist_ok=True)
@@ -247,7 +236,6 @@ def coletar():
             log.info("Acessando PI Vision...")
             page.goto(URL, timeout=60000, wait_until="networkidle")
 
-            # Login se necessario
             login_f = page.query_selector("input[type='text'], input[name='username']")
             pass_f = page.query_selector("input[type='password']")
             if login_f and pass_f:
@@ -277,7 +265,6 @@ def coletar():
 
             try:
                 with open(ARQUIVO_DEBUG, "w", encoding="utf-8") as f:
-                    # Salvar sem coords pra economizar espaco
                     debug_data = {
                         "graficos": [{**g, "coords": f"[{g['n']} pontos]"} for g in R["graficos"]],
                         "eixos": R["eixos"],
@@ -305,6 +292,68 @@ def coletar():
     log.info("COLETA FINALIZADA")
 
 
+def construir_mapa_pixel_valor(eixo, graf):
+    """
+    Constroi uma funcao de mapeamento pixel Y -> valor
+    usando os ticks do eixo Y e a posicao do grafico na tela.
+
+    Os ticks do eixo Y estao em coordenadas absolutas (tela).
+    O grafico SVG tambem tem coordenadas absolutas (bbox).
+    Precisamos converter os ticks pra coordenadas do viewBox do SVG.
+    """
+    vals = eixo["valores"]  # [{val, absY}, ...]
+    if len(vals) < 2:
+        return None
+
+    # O grafico e o eixo compartilham a mesma faixa vertical na tela
+    # absY do tick -> posicao relativa no grafico
+    graf_top = graf["bbox_y"]       # Y absoluto do topo do SVG do grafico
+    graf_bottom = graf["bbox_y"] + graf["bbox_h"]  # Y absoluto do fundo
+    graf_h_screen = graf["bbox_h"]  # altura na tela
+
+    # Proporcao tela -> viewBox
+    vb_h = graf["ph"]  # altura do viewBox
+    scale = vb_h / graf_h_screen if graf_h_screen > 0 else 1
+
+    # Converter cada tick pra coordenada do viewBox
+    ticks = []
+    for v in vals:
+        # Posicao do tick na tela -> posicao relativa no SVG
+        rel_screen = v["absY"] - graf_top
+        # Converter pra viewBox
+        vb_y = rel_screen * scale
+        ticks.append({"val": v["val"], "vb_y": vb_y})
+
+    # Ordenar por vb_y (topo pra baixo = valor maior pra menor)
+    ticks.sort(key=lambda t: t["vb_y"])
+
+    # Precisamos de pelo menos 2 ticks pra interpolar
+    if len(ticks) < 2:
+        return None
+
+    # Regressao linear: val = a * vb_y + b
+    # Usar primeiro e ultimo tick
+    t_top = ticks[0]      # menor vb_y = topo = maior valor
+    t_bot = ticks[-1]     # maior vb_y = fundo = menor valor
+
+    dy = t_bot["vb_y"] - t_top["vb_y"]
+    dv = t_bot["val"] - t_top["val"]
+
+    if abs(dy) < 0.001:
+        return None
+
+    # a = dv/dy (negativo: y cresce pra baixo, valor diminui)
+    a = dv / dy
+    b = t_top["val"] - a * t_top["vb_y"]
+
+    return {"a": a, "b": b, "ticks": ticks}
+
+
+def pixel_para_valor(py, mapa):
+    """Converte coordenada Y do viewBox pra valor real."""
+    return mapa["a"] * py + mapa["b"]
+
+
 def processar(R):
     agora = datetime.now()
     coleta = {
@@ -318,100 +367,58 @@ def processar(R):
     eixos = R.get("eixos", [])
     textos = R.get("textos", [])
 
-    # 1. Mapear textos grandes -> valores atuais por cor
+    # 1. Valores reais dos textos grandes
     valores_reais = {}
     for t in textos:
-        cor = t["color"].strip()
-        param = CORES_TEXTOS.get(cor)
-        if not param:
-            for c, p in CORES_TEXTOS.items():
-                if c.replace(" ", "") == cor.replace(" ", ""):
-                    param = p
-                    break
+        param = cor_para_param(t["color"], CORES_TEXTOS)
         if param:
             valores_reais[param] = t["valor"]
             coleta["valores_atuais"][param] = t["valor"]
-            log.info(f"  Texto: {param} = {t['valor']} (cor={cor})")
+            log.info(f"  Texto: {param} = {t['valor']}")
 
-    # 2. Range de tempo (8h padrao do PI Vision)
+    # 2. Tempo: 8h
     tempo_fim = agora
     tempo_inicio = agora - timedelta(hours=8)
-    duracao = 8 * 3600  # segundos
+    duracao = 8 * 3600
 
-    # 3. Processar cada grafico
-    # Ordenar graficos pela posicao Y na tela (cloro=topo, ph=base)
-    graficos_ordenados = sorted(graficos, key=lambda g: g.get("svg_idx", 0))
-
-    for graf in graficos_ordenados:
+    # 3. Associar cada grafico ao eixo Y mais proximo
+    for graf in sorted(graficos, key=lambda g: g["svg_idx"]):
         cor = graf["cor"].strip()
-        param = CORES_GRAFICOS.get(cor)
+        param = cor_para_param(cor, CORES_GRAFICOS)
         if not param:
-            for c, p in CORES_GRAFICOS.items():
-                if c.replace(" ", "") == cor.replace(" ", ""):
-                    param = p
-                    break
-        if not param:
-            log.warning(f"  Cor grafico nao mapeada: {cor}")
+            log.warning(f"  Cor nao mapeada: {cor}")
             continue
 
         coords = graf["coords"]
-        pw = graf["pw"]  # largura do plot em pixels/viewbox
-        ph = graf["ph"]  # altura do plot em pixels/viewbox
-
+        pw = graf["pw"]
+        ph = graf["ph"]
         if pw <= 0 or ph <= 0:
             continue
 
-        # Determinar escala Y
-        escala = ESCALAS_FALLBACK[param]
-        y_min = escala["min"]
-        y_max = escala["max"]
-
-        # Tentar calibrar com eixo Y adjacente
-        # Encontrar eixo Y mais proximo deste grafico
+        # Encontrar eixo Y adjacente (svg_idx mais proximo, antes do grafico)
         melhor_eixo = None
         melhor_dist = float('inf')
         for eixo in eixos:
-            # Eixo Y fica logo antes do SVG do grafico
-            dist = abs(eixo["svg_idx"] - graf["svg_idx"])
-            if dist < melhor_dist and dist <= 2:
+            dist = graf["svg_idx"] - eixo["svg_idx"]
+            # Eixo deve estar 1-3 SVGs antes do grafico
+            if 0 < dist <= 3 and dist < melhor_dist:
                 melhor_dist = dist
                 melhor_eixo = eixo
 
-        if melhor_eixo and len(melhor_eixo["valores"]) >= 2:
-            vals = [v["val"] for v in melhor_eixo["valores"]]
-            y_min = min(vals)
-            y_max = max(vals)
-            log.info(f"  {param}: eixo Y do SVG = {y_min}-{y_max}")
+        # Construir mapa de calibracao pixel->valor
+        mapa_pv = None
+        if melhor_eixo:
+            mapa_pv = construir_mapa_pixel_valor(melhor_eixo, graf)
+            if mapa_pv:
+                # Validar com os ticks
+                ticks = mapa_pv["ticks"]
+                t0 = ticks[0]
+                t1 = ticks[-1]
+                log.info(f"  {param}: calibracao por ticks: "
+                         f"py={t0['vb_y']:.1f}->val={t0['val']}, "
+                         f"py={t1['vb_y']:.1f}->val={t1['val']}")
 
-        # CALIBRACAO COM VALOR REAL:
-        # Se temos o valor real (texto grande) e sabemos que e o ultimo ponto
-        # do grafico, podemos validar/ajustar a escala
-        valor_real = valores_reais.get(param)
-        if valor_real is not None:
-            # Pegar o ultimo ponto (maior X) e seu Y em pixel
-            ultimo = max(coords, key=lambda c: c["px"])
-            # Calcular que valor o pixel daria com a escala atual
-            frac_y = 1.0 - (ultimo["py"] / ph) if ph > 0 else 0
-            frac_y = max(0, min(1, frac_y))
-            valor_calculado = y_min + frac_y * (y_max - y_min)
-
-            log.info(f"  {param}: ultimo pixel Y={ultimo['py']:.1f}, "
-                     f"calculado={valor_calculado:.2f}, real={valor_real}")
-
-            # Se a diferenca for grande, recalibrar a escala
-            if abs(valor_calculado - valor_real) > 0.1:
-                log.info(f"  {param}: RECALIBRANDO escala...")
-                # Usar o range de pixels pra estimar a escala real
-                # frac_y = (valor_real - y_min_real) / (y_max_real - y_min_real)
-                # Sabemos frac_y e valor_real, assumimos y_min_real = 0
-                # Entao: y_max_real = valor_real / frac_y (se frac_y > 0)
-                if frac_y > 0.05:
-                    y_max_novo = valor_real / frac_y
-                    y_min = 0
-                    y_max = y_max_novo
-                    log.info(f"  {param}: escala recalibrada para 0-{y_max:.2f}")
-
-        # Converter todos os pontos
+        # Converter coordenadas
         serie = []
         for coord in coords:
             # X -> tempo
@@ -420,9 +427,14 @@ def processar(R):
             ts = tempo_inicio + timedelta(seconds=frac_x * duracao)
 
             # Y -> valor
-            frac_y = 1.0 - (coord["py"] / ph) if ph > 0 else 0
-            frac_y = max(0, min(1, frac_y))
-            valor = y_min + frac_y * (y_max - y_min)
+            if mapa_pv:
+                valor = pixel_para_valor(coord["py"], mapa_pv)
+            else:
+                # Fallback: escala simples
+                escala = ESCALAS_FALLBACK[param]
+                frac_y = 1.0 - (coord["py"] / ph) if ph > 0 else 0
+                frac_y = max(0, min(1, frac_y))
+                valor = escala["min"] + frac_y * (escala["max"] - escala["min"])
 
             serie.append({
                 "t": ts.strftime("%Y-%m-%dT%H:%M:%S"),
@@ -431,7 +443,7 @@ def processar(R):
 
         serie.sort(key=lambda d: d["t"])
 
-        # Remover duplicatas por minuto
+        # Deduplica por minuto
         seen = set()
         serie_unica = []
         for d in serie:
@@ -440,15 +452,41 @@ def processar(R):
                 seen.add(k)
                 serie_unica.append(d)
 
+        # Validar com valor real
+        valor_real = valores_reais.get(param)
+        ultimo_calc = serie_unica[-1]["v"] if serie_unica else None
+        erro = abs(ultimo_calc - valor_real) if (ultimo_calc is not None and valor_real is not None) else None
+
+        log.info(f"  {param}: {len(serie_unica)} pontos, "
+                 f"ultimo_calc={ultimo_calc:.4f if ultimo_calc else 'N/A'}, "
+                 f"real={valor_real}, "
+                 f"erro={erro:.4f if erro is not None else 'N/A'}")
+
+        # Se o erro ainda for grande, ajustar com offset simples
+        if erro is not None and valor_real is not None and ultimo_calc is not None:
+            if erro > 0.5 and valor_real > 0:
+                # Calcular fator de correcao
+                if abs(ultimo_calc) > 0.001:
+                    fator = valor_real / ultimo_calc
+                else:
+                    # Valor calculado ~0 mas real nao: usar offset
+                    offset = valor_real - ultimo_calc
+                    log.info(f"  {param}: aplicando offset={offset:.4f}")
+                    serie_unica = [{"t": d["t"], "v": round(d["v"] + offset, 4)} for d in serie_unica]
+                    fator = None
+
+                if fator is not None and 0.5 < fator < 5:
+                    log.info(f"  {param}: aplicando fator={fator:.4f}")
+                    serie_unica = [{"t": d["t"], "v": round(d["v"] * fator, 4)} for d in serie_unica]
+
+                # Recalcular ultimo
+                ultimo_final = serie_unica[-1]["v"] if serie_unica else None
+                log.info(f"  {param}: apos correcao, ultimo={ultimo_final:.4f if ultimo_final else 'N/A'}")
+
         coleta["series"][param] = {
             "num_pontos": len(serie_unica),
-            "escala_y": {"min": round(y_min, 2), "max": round(y_max, 2)},
             "dados": serie_unica
         }
-
-        ultimo_v = serie_unica[-1]["v"] if serie_unica else None
-        log.info(f"  {param}: {len(serie_unica)} pontos, "
-                 f"escala={y_min:.1f}-{y_max:.1f}, ultimo={ultimo_v}")
 
     return coleta
 
@@ -470,7 +508,7 @@ def salvar(coleta):
         json.dump(historico, f, indent=2, ensure_ascii=False)
 
     total = sum(s.get("num_pontos", 0) for s in coleta.get("series", {}).values())
-    log.info(f"Salvo. Coletas: {len(historico)}, Pontos nesta coleta: {total}")
+    log.info(f"Salvo. Coletas: {len(historico)}, Pontos: {total}")
 
 
 if __name__ == "__main__":
