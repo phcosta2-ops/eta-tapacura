@@ -22076,5 +22076,11 @@
         ]
       }
     }
+  },
+  {
+    "timestamp": "2026-04-09T21:41:47.976019",
+    "tipo": "erro",
+    "erro": "Invalid format specifier '.4f if ultimo_calc else 'N/A'' for object of type 'float'",
+    "series": {}
   }
 ]
