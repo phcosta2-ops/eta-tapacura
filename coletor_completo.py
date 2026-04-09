@@ -1,12 +1,13 @@
 """
 =============================================================
-COLETOR ETA TAPACURA - VERSAO COMPLETA (GRAFICOS)
+COLETOR ETA TAPACURA - V2 (CALIBRADO)
 =============================================================
-Extrai TODOS os pontos dos graficos do PI Vision,
-nao apenas o valor atual. Cada coleta pega ~8h de dados
-com resolucao de minutos.
-
-Usa Playwright + extracao de SVG/Canvas.
+Extrai TODOS os pontos dos graficos do PI Vision via SVG.
+Calibrado com as cores reais dos graficos da COMPESA:
+  - Laranja rgb(224,138,0) = Cloro Residual (ppm)
+  - Amarelo rgb(255,240,0) = Cor (uC)
+  - Verde   rgb(60,191,60) = Turbidez (NTU)
+  - Roxo    rgb(178,107,255) = pH
 =============================================================
 """
 
@@ -14,7 +15,6 @@ import json
 import os
 import sys
 import time
-import re
 import logging
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -41,258 +41,161 @@ SENHA = os.environ.get("ETA_SENHA", "SUA_SENHA_AQUI")
 ARQUIVO_DADOS = "dados/dados_eta.json"
 ARQUIVO_SCREENSHOT = "dados/ultimo_screenshot.png"
 ARQUIVO_DEBUG = "dados/debug_html.txt"
+
+# Mapeamento de cores SVG para parametros
+# Baseado nos dados reais coletados do PI Vision
+CORES_PARAMETROS = {
+    "rgb(224, 138, 0)":   "cloro_ppm",
+    "rgb(224,138,0)":     "cloro_ppm",
+    "rgb(255, 240, 0)":   "cor_uc",
+    "rgb(255,240,0)":     "cor_uc",
+    "rgb(60, 191, 60)":   "turbidez_ntu",
+    "rgb(60,191,60)":     "turbidez_ntu",
+    "rgb(178, 107, 255)": "ph",
+    "rgb(178,107,255)":   "ph",
+}
+
+# Escalas dos eixos Y (baseado na imagem do PI Vision)
+ESCALAS = {
+    "cloro_ppm":     {"min": 0, "max": 6},
+    "cor_uc":        {"min": 0, "max": 250},
+    "turbidez_ntu":  {"min": 0, "max": 20},
+    "ph":            {"min": 0, "max": 7},
+}
 # ============================================================
 
 
-# JavaScript que roda DENTRO do navegador para extrair dados dos graficos
-# PI Vision usa SVG para renderizar trends (graficos de linha)
 JS_EXTRAIR_GRAFICOS = """
 () => {
     const resultado = {
-        metodo: null,
-        graficos: {},
-        valores_tela: {},
+        graficos: [],
+        eixos_y: [],
+        eixos_x: [],
+        valores_texto: [],
         debug: []
     };
 
-    // =============================================
-    // METODO 1: Extrair dados via SVG paths/polylines
-    // =============================================
-    try {
-        // PI Vision geralmente tem elementos com classes como:
-        // .trend-line, .data-line, path, polyline dentro de SVG
-        const svgs = document.querySelectorAll('svg');
-        resultado.debug.push(`SVGs encontrados: ${svgs.length}`);
+    const svgs = document.querySelectorAll('svg');
+    resultado.debug.push('SVGs: ' + svgs.length);
 
-        svgs.forEach((svg, idx) => {
-            // Pegar dimensoes do SVG
-            const bbox = svg.getBoundingClientRect();
-            resultado.debug.push(`SVG[${idx}] dimensoes: ${bbox.width}x${bbox.height} em (${bbox.x},${bbox.y})`);
+    svgs.forEach((svg, idx) => {
+        const bbox = svg.getBoundingClientRect();
+        if (bbox.width < 100 || bbox.height < 50) return;  // ignorar SVGs pequenos
 
-            // Buscar paths (linhas dos graficos)
-            const paths = svg.querySelectorAll('path[d], polyline[points]');
-            resultado.debug.push(`SVG[${idx}] paths/polylines: ${paths.length}`);
+        const paths = svg.querySelectorAll('path.trace-line');
+        if (paths.length === 0) return;
 
-            paths.forEach((path, pidx) => {
-                const classe = path.getAttribute('class') || '';
-                const cor = window.getComputedStyle(path).stroke || path.getAttribute('stroke') || '';
-                const d = path.getAttribute('d') || '';
-                const points = path.getAttribute('points') || '';
+        resultado.debug.push('SVG[' + idx + '] ' + bbox.width.toFixed(0) + 'x' + bbox.height.toFixed(0) + ' paths=' + paths.length);
 
-                // Ignorar paths muito curtos (eixos, grades)
-                const dataStr = d || points;
-                if (dataStr.length < 50) return;
+        // Pegar viewBox
+        const viewBox = svg.getAttribute('viewBox') || '';
+        const vbParts = viewBox.split(/[\\s,]+/).map(Number);
 
-                resultado.debug.push(`  Path[${pidx}] cor=${cor} classe=${classe} tam=${dataStr.length}`);
+        paths.forEach((path, pidx) => {
+            const cor = window.getComputedStyle(path).stroke || path.getAttribute('stroke') || '';
+            const d = path.getAttribute('d') || '';
+            if (d.length < 50) return;
 
-                // Extrair coordenadas do path
-                let coordenadas = [];
+            // Extrair coordenadas
+            const coords = [];
+            const matches = d.matchAll(/[ML]\\s*([\\d.eE+-]+)[,\\s]([\\d.eE+-]+)/gi);
+            for (const m of matches) {
+                coords.push({
+                    px: parseFloat(m[1]),
+                    py: parseFloat(m[2])
+                });
+            }
 
-                if (d) {
-                    // Parse SVG path "M x,y L x,y L x,y..."
-                    const matches = d.matchAll(/[ML]\\s*([\\d.eE+-]+)[,\\s]([\\d.eE+-]+)/gi);
-                    for (const m of matches) {
-                        coordenadas.push({
-                            x: parseFloat(m[1]),
-                            y: parseFloat(m[2])
-                        });
+            if (coords.length > 5) {
+                // Pegar as dimensoes da area de plot
+                // (o SVG do grafico, nao o SVG do eixo)
+                let plotWidth = bbox.width;
+                let plotHeight = bbox.height;
+
+                if (vbParts.length === 4) {
+                    plotWidth = vbParts[2];
+                    plotHeight = vbParts[3];
+                }
+
+                resultado.graficos.push({
+                    svg_idx: idx,
+                    cor: cor,
+                    num_pontos: coords.length,
+                    coords: coords,
+                    plot_width: plotWidth,
+                    plot_height: plotHeight,
+                    viewBox: viewBox,
+                    svg_bbox: {
+                        x: bbox.x, y: bbox.y,
+                        w: bbox.width, h: bbox.height
                     }
-                }
-
-                if (points) {
-                    // Parse polyline "x,y x,y x,y"
-                    const pares = points.trim().split(/\\s+/);
-                    for (const par of pares) {
-                        const [x, y] = par.split(',').map(Number);
-                        if (!isNaN(x) && !isNaN(y)) {
-                            coordenadas.push({ x, y });
-                        }
-                    }
-                }
-
-                if (coordenadas.length > 5) {
-                    const key = `svg${idx}_path${pidx}`;
-                    resultado.graficos[key] = {
-                        cor: cor,
-                        classe: classe,
-                        num_pontos: coordenadas.length,
-                        coordenadas: coordenadas,
-                        svg_width: bbox.width,
-                        svg_height: bbox.height,
-                        svg_viewBox: svg.getAttribute('viewBox') || ''
-                    };
-                    resultado.metodo = 'svg_path';
-                }
-            });
-        });
-    } catch(e) {
-        resultado.debug.push(`Erro SVG: ${e.message}`);
-    }
-
-    // =============================================
-    // METODO 2: Interceptar dados via PI Web API
-    // (PI Vision faz requests XHR para pegar dados)
-    // =============================================
-    try {
-        // Verificar se ha dados no performance entries
-        const entries = performance.getEntriesByType('resource');
-        const apiCalls = entries.filter(e =>
-            e.name.includes('/piwebapi/') ||
-            e.name.includes('/streams/') ||
-            e.name.includes('/recorded') ||
-            e.name.includes('/interpolated') ||
-            e.name.includes('/plot')
-        );
-        resultado.debug.push(`PI Web API calls encontradas: ${apiCalls.length}`);
-        apiCalls.forEach(c => resultado.debug.push(`  API: ${c.name.substring(0, 150)}`));
-    } catch(e) {
-        resultado.debug.push(`Erro API check: ${e.message}`);
-    }
-
-    // =============================================
-    // METODO 3: Extrair dados de Canvas (se SVG nao funcionar)
-    // =============================================
-    try {
-        const canvases = document.querySelectorAll('canvas');
-        resultado.debug.push(`Canvas encontrados: ${canvases.length}`);
-        // Canvas nao da pra extrair pontos facilmente,
-        // mas registramos pra debug
-    } catch(e) {
-        resultado.debug.push(`Erro Canvas: ${e.message}`);
-    }
-
-    // =============================================
-    // METODO 4: Buscar dados em variaveis JS globais
-    // (PI Vision pode guardar dados em escopo Angular/React)
-    // =============================================
-    try {
-        // PI Vision usa AngularJS — tentar acessar os scopes
-        const angular = window.angular;
-        if (angular) {
-            resultado.debug.push('AngularJS detectado!');
-
-            // Buscar elementos com ng-scope
-            const scopes = document.querySelectorAll('[ng-scope], [data-ng-scope], .ng-scope');
-            resultado.debug.push(`Elementos com ng-scope: ${scopes.length}`);
-
-            scopes.forEach((el, idx) => {
-                try {
-                    const scope = angular.element(el).scope();
-                    if (scope) {
-                        // Procurar por dados de trend/chart
-                        const keys = Object.keys(scope).filter(k =>
-                            !k.startsWith('$') &&
-                            !k.startsWith('_') &&
-                            typeof scope[k] !== 'function'
-                        );
-
-                        keys.forEach(k => {
-                            const val = scope[k];
-                            if (val && typeof val === 'object') {
-                                // Procurar arrays de dados
-                                if (Array.isArray(val) && val.length > 5) {
-                                    const sample = val.slice(0, 3);
-                                    resultado.debug.push(`  scope[${idx}].${k} = Array[${val.length}] amostra: ${JSON.stringify(sample).substring(0, 200)}`);
-
-                                    // Se parece com dados de serie temporal
-                                    if (val[0] && (val[0].Value !== undefined || val[0].value !== undefined || val[0].y !== undefined)) {
-                                        resultado.graficos[`angular_${k}`] = {
-                                            fonte: 'angular_scope',
-                                            dados: val.slice(0, 1000), // limitar tamanho
-                                            num_pontos: val.length
-                                        };
-                                        resultado.metodo = 'angular_scope';
-                                    }
-                                }
-                                // Objeto com propriedade Items/items (padrao PI Web API)
-                                if (val.Items || val.items) {
-                                    const items = val.Items || val.items;
-                                    resultado.debug.push(`  scope[${idx}].${k}.Items = Array[${items.length}]`);
-                                    if (items.length > 5) {
-                                        resultado.graficos[`angular_${k}_items`] = {
-                                            fonte: 'angular_scope_items',
-                                            dados: items.slice(0, 1000),
-                                            num_pontos: items.length
-                                        };
-                                        resultado.metodo = 'angular_scope';
-                                    }
-                                }
-                            }
-                        });
-                    }
-                } catch(e) {}
-            });
-        } else {
-            resultado.debug.push('AngularJS NAO detectado');
-        }
-    } catch(e) {
-        resultado.debug.push(`Erro Angular: ${e.message}`);
-    }
-
-    // =============================================
-    // SEMPRE: Extrair valores de texto visiveis na tela
-    // =============================================
-    try {
-        // Pegar todos elementos com texto que parecem valores
-        const allElements = document.querySelectorAll('*');
-        const textValues = [];
-
-        allElements.forEach(el => {
-            if (el.children.length > 2) return; // pular containers
-            const text = (el.innerText || '').trim();
-            if (!text || text.length > 30 || text.length < 1) return;
-
-            // Formato: numero com virgula ou ponto
-            const match = text.match(/^[\\d]+[,.]?[\\d]*$/);
-            if (match) {
-                const valor = parseFloat(text.replace(',', '.'));
-                if (valor >= 0 && valor <= 1000) {
-                    const rect = el.getBoundingClientRect();
-                    textValues.push({
-                        texto: text,
-                        valor: valor,
-                        classe: (el.className || '').toString().substring(0, 100),
-                        id: (el.id || '').substring(0, 50),
-                        tag: el.tagName,
-                        x: rect.x,
-                        y: rect.y,
-                        width: rect.width,
-                        height: rect.height
-                    });
-                }
+                });
+                resultado.debug.push('  trace-line cor=' + cor + ' pontos=' + coords.length);
             }
         });
 
-        resultado.valores_tela = textValues;
-        resultado.debug.push(`Valores de texto na tela: ${textValues.length}`);
-
-    } catch(e) {
-        resultado.debug.push(`Erro texto: ${e.message}`);
-    }
-
-    // =============================================
-    // Pegar HTML dos graficos pra debug
-    // =============================================
-    try {
-        const trendAreas = document.querySelectorAll(
-            '[class*="trend"], [class*="chart"], [class*="plot"], ' +
-            '[class*="Trend"], [class*="Chart"], [class*="Plot"], ' +
-            '[class*="graph"], [class*="Graph"]'
-        );
-        resultado.debug.push(`Elementos trend/chart/plot: ${trendAreas.length}`);
-        trendAreas.forEach((el, idx) => {
-            resultado.debug.push(`  [${idx}] tag=${el.tagName} class=${(el.className || '').toString().substring(0, 80)}`);
+        // Tentar pegar os labels dos eixos Y
+        const yTexts = svg.querySelectorAll('text');
+        const yValues = [];
+        yTexts.forEach(t => {
+            const val = parseFloat((t.textContent || '').trim().replace(',', '.'));
+            if (!isNaN(val)) {
+                const tb = t.getBoundingClientRect();
+                yValues.push({ val: val, y: tb.y, x: tb.x });
+            }
         });
-    } catch(e) {}
+        if (yValues.length > 1) {
+            resultado.eixos_y.push({
+                svg_idx: idx,
+                valores: yValues.sort((a,b) => a.y - b.y)
+            });
+        }
+    });
+
+    // Pegar eixo X (timestamps) - geralmente no SVG do eixo X
+    // Tambem buscar nos eixos dos trends
+    const allTexts = document.querySelectorAll('text');
+    const timestamps = [];
+    allTexts.forEach(t => {
+        const txt = (t.textContent || '').trim();
+        // Formato tipico: "09/04/2026 04:04:31" ou "8 h" ou "04:00"
+        if (txt.match(/\\d{2}[\\/:]\\d{2}/)) {
+            const tb = t.getBoundingClientRect();
+            timestamps.push({ texto: txt, x: tb.x, y: tb.y });
+        }
+    });
+    resultado.eixos_x = timestamps;
+
+    // Valores de texto grandes (leituras atuais)
+    const allElements = document.querySelectorAll('*');
+    allElements.forEach(el => {
+        if (el.children.length > 2) return;
+        const text = (el.innerText || '').trim();
+        if (!text || text.length > 20 || text.length < 1) return;
+        const match = text.match(/^[\\d]+[,.]?[\\d]*$/);
+        if (match) {
+            const valor = parseFloat(text.replace(',', '.'));
+            if (valor >= 0 && valor <= 1000) {
+                const rect = el.getBoundingClientRect();
+                resultado.valores_texto.push({
+                    texto: text, valor: valor,
+                    x: rect.x, y: rect.y,
+                    w: rect.width, h: rect.height,
+                    fontSize: window.getComputedStyle(el).fontSize,
+                    color: window.getComputedStyle(el).color
+                });
+            }
+        }
+    });
 
     return resultado;
 }
-""";
+"""
 
 
 def coletar():
     log.info("=" * 60)
-    log.info("INICIANDO COLETA COMPLETA (COM GRAFICOS)")
+    log.info("COLETA V2 - ETA TAPACURA (CALIBRADO)")
     log.info("=" * 60)
 
     Path("dados").mkdir(exist_ok=True)
@@ -311,102 +214,49 @@ def coletar():
         )
         page = context.new_page()
 
-        # Interceptar chamadas de API do PI Vision
-        api_responses = []
-
-        def capturar_response(response):
-            """Captura respostas da PI Web API automaticamente."""
-            url = response.url
-            if any(kw in url.lower() for kw in
-                   ['/piwebapi/', '/streams/', '/recorded',
-                    '/interpolated', '/plot', '/summary']):
-                try:
-                    body = response.json()
-                    api_responses.append({
-                        "url": url[:300],
-                        "status": response.status,
-                        "dados": body
-                    })
-                    log.info(f"  API capturada: {url[:100]}...")
-                except:
-                    pass
-
-        page.on("response", capturar_response)
-
         try:
-            # Acessar pagina
             log.info("Acessando PI Vision...")
             page.goto(URL, timeout=60000, wait_until="networkidle")
-            log.info("Pagina carregou. Aguardando renderizacao...")
 
             # Verificar login
-            login_field = page.query_selector(
-                "input[type='text'], input[name='username'], "
-                "input[placeholder*='usu'], input[placeholder*='user']"
-            )
+            login_field = page.query_selector("input[type='text'], input[name='username']")
             password_field = page.query_selector("input[type='password']")
-
             if login_field and password_field:
-                log.info("Formulario de login detectado...")
+                log.info("Login encontrado, preenchendo...")
                 login_field.fill(USUARIO)
                 password_field.fill(SENHA)
-                submit = page.query_selector(
-                    "button[type='submit'], input[type='submit']"
-                )
+                submit = page.query_selector("button[type='submit'], input[type='submit']")
                 if submit:
                     submit.click()
                 else:
                     password_field.press("Enter")
                 page.wait_for_timeout(8000)
-                log.info("Login feito.")
 
-            # Esperar os graficos renderizarem completamente
-            log.info("Aguardando graficos renderizarem (15s)...")
+            log.info("Aguardando graficos (15s)...")
             page.wait_for_timeout(15000)
 
             # Screenshot
             page.screenshot(path=ARQUIVO_SCREENSHOT, full_page=True)
-            log.info(f"Screenshot: {ARQUIVO_SCREENSHOT}")
+            log.info(f"Screenshot salvo")
 
-            # Extrair dados via JavaScript
-            log.info("Executando extracao de dados...")
-            resultado_js = page.evaluate(JS_EXTRAIR_GRAFICOS)
+            # Extrair dados
+            log.info("Extraindo SVG dos graficos...")
+            resultado = page.evaluate(JS_EXTRAIR_GRAFICOS)
 
-            # Log de debug
-            log.info(f"Metodo de extracao: {resultado_js.get('metodo', 'nenhum')}")
-            log.info(f"Graficos encontrados: {len(resultado_js.get('graficos', {}))}")
-            log.info(f"Valores de texto: {len(resultado_js.get('valores_tela', []))}")
-            log.info(f"APIs interceptadas: {len(api_responses)}")
-
-            for msg in resultado_js.get('debug', []):
+            for msg in resultado.get('debug', []):
                 log.info(f"  [JS] {msg}")
 
-            # Processar os dados coletados
-            coleta = processar_resultado(resultado_js, api_responses)
+            # Processar graficos
+            coleta = processar(resultado)
 
-            # Salvar debug HTML pra analise
+            # Salvar debug
             try:
-                # Pegar HTML das areas de grafico
-                html_graficos = page.evaluate("""
-                    () => {
-                        const areas = document.querySelectorAll(
-                            'svg, [class*="trend"], [class*="chart"], [class*="value"], [class*="Value"]'
-                        );
-                        let html = '';
-                        areas.forEach((el, i) => {
-                            html += `\\n<!-- ELEMENTO ${i}: ${el.tagName} class="${el.className}" -->\\n`;
-                            html += el.outerHTML.substring(0, 5000) + '\\n';
-                        });
-                        return html;
-                    }
-                """)
                 with open(ARQUIVO_DEBUG, "w", encoding="utf-8") as f:
-                    f.write(html_graficos[:500000])  # limitar tamanho
-                log.info(f"Debug HTML salvo: {ARQUIVO_DEBUG}")
+                    json.dump(resultado, f, indent=2, ensure_ascii=False)
+                log.info("Debug salvo")
             except Exception as e:
-                log.warning(f"Erro ao salvar debug: {e}")
+                log.warning(f"Erro debug: {e}")
 
-            # Salvar
             salvar(coleta)
 
         except Exception as e:
@@ -419,7 +269,6 @@ def coletar():
                 "timestamp": datetime.now().isoformat(),
                 "tipo": "erro",
                 "erro": str(e),
-                "valores_atuais": {},
                 "series": {}
             })
         finally:
@@ -429,8 +278,8 @@ def coletar():
     log.info("COLETA FINALIZADA")
 
 
-def processar_resultado(resultado_js, api_responses):
-    """Processa os dados brutos e organiza em formato final."""
+def processar(resultado):
+    """Processa os graficos SVG e converte pixel -> valores reais."""
     agora = datetime.now()
     coleta = {
         "timestamp": agora.isoformat(),
@@ -439,138 +288,149 @@ def processar_resultado(resultado_js, api_responses):
         "series": {}
     }
 
-    # 1. Processar valores de texto (leitura atual)
-    valores_tela = resultado_js.get("valores_tela", [])
-    if valores_tela:
-        # Classificar por posicao Y na tela (os 4 parametros ficam empilhados)
-        valores_tela.sort(key=lambda v: v.get("y", 0))
+    graficos = resultado.get("graficos", [])
+    eixos_y = resultado.get("eixos_y", [])
+    eixos_x = resultado.get("eixos_x", [])
+    valores_texto = resultado.get("valores_texto", [])
 
-        # Tentar mapear por posicao ou contexto
-        for v in valores_tela:
-            ctx = f"{v.get('classe', '')} {v.get('id', '')}".lower()
-            valor = v["valor"]
+    log.info(f"Graficos trace-line: {len(graficos)}")
+    log.info(f"Eixos Y encontrados: {len(eixos_y)}")
+    log.info(f"Timestamps no eixo X: {len(eixos_x)}")
+    log.info(f"Valores texto na tela: {len(valores_texto)}")
 
-            if "cloro" in ctx:
-                coleta["valores_atuais"]["cloro_ppm"] = valor
-            elif "cor" in ctx and "corpo" not in ctx:
-                coleta["valores_atuais"]["cor_uc"] = valor
-            elif "turb" in ctx:
-                coleta["valores_atuais"]["turbidez_ntu"] = valor
-            elif "ph" in ctx and "phone" not in ctx:
-                coleta["valores_atuais"]["ph"] = valor
+    # Descobrir range de tempo do eixo X
+    # Tipicamente o PI Vision mostra 8h
+    # Vamos tentar extrair dos timestamps do eixo X
+    tempo_inicio = None
+    tempo_fim = None
 
-        log.info(f"Valores atuais: {coleta['valores_atuais']}")
-
-    # 2. Processar dados de API interceptada (MELHOR FONTE!)
-    if api_responses:
-        log.info(f"Processando {len(api_responses)} respostas de API...")
-        for resp in api_responses:
+    for ts in eixos_x:
+        txt = ts["texto"]
+        try:
+            # Tentar formato "09/04/2026 04:04:31"
+            dt = datetime.strptime(txt, "%d/%m/%Y %H:%M:%S")
+            if tempo_inicio is None or dt < tempo_inicio:
+                tempo_inicio = dt
+            if tempo_fim is None or dt > tempo_fim:
+                tempo_fim = dt
+        except ValueError:
             try:
-                dados = resp["dados"]
-                url = resp["url"].lower()
+                # Formato "04:04" ou "08:00"
+                dt = datetime.strptime(txt, "%H:%M")
+                dt = dt.replace(year=agora.year, month=agora.month, day=agora.day)
+                if tempo_inicio is None or dt < tempo_inicio:
+                    tempo_inicio = dt
+                if tempo_fim is None or dt > tempo_fim:
+                    tempo_fim = dt
+            except ValueError:
+                pass
 
-                # PI Web API retorna Items com Timestamp + Value
-                items = None
-                nome = "desconhecido"
+    if tempo_inicio and tempo_fim:
+        log.info(f"Range de tempo: {tempo_inicio} -> {tempo_fim}")
+    else:
+        # Fallback: assumir 8h atras ate agora
+        tempo_fim = agora
+        tempo_inicio = agora - timedelta(hours=8)
+        log.info(f"Range de tempo (estimado): {tempo_inicio} -> {tempo_fim}")
 
-                if isinstance(dados, dict):
-                    items = dados.get("Items", dados.get("items", []))
-                    nome = dados.get("Name", dados.get("name",
-                           dados.get("Label", "desconhecido")))
+    duracao_total = (tempo_fim - tempo_inicio).total_seconds()
+    if duracao_total <= 0:
+        duracao_total = 8 * 3600  # fallback 8h
 
-                if items and len(items) > 0:
-                    serie = []
-                    for item in items:
-                        ts = item.get("Timestamp", item.get("timestamp", ""))
-                        val = item.get("Value", item.get("value", None))
+    # Processar cada grafico trace-line
+    for graf in graficos:
+        cor = graf["cor"].strip()
+        parametro = CORES_PARAMETROS.get(cor)
 
-                        # Value pode ser um objeto com sub-propriedades
-                        if isinstance(val, dict):
-                            val = val.get("Value", val.get("value", None))
+        if not parametro:
+            # Tentar match parcial
+            for cor_ref, param in CORES_PARAMETROS.items():
+                if cor_ref.replace(" ", "") == cor.replace(" ", ""):
+                    parametro = param
+                    break
 
-                        if ts and val is not None:
-                            try:
-                                serie.append({
-                                    "t": ts,
-                                    "v": float(val) if not isinstance(val, bool) else None
-                                })
-                            except (ValueError, TypeError):
-                                pass
+        if not parametro:
+            log.warning(f"  Cor nao mapeada: {cor} ({graf['num_pontos']} pontos)")
+            continue
 
-                    if serie:
-                        # Identificar parametro pelo nome ou URL
-                        param = identificar_parametro(nome, url)
-                        coleta["series"][param] = {
-                            "nome_original": nome,
-                            "num_pontos": len(serie),
-                            "dados": serie
-                        }
-                        log.info(f"  Serie '{param}': {len(serie)} pontos (nome={nome})")
+        escala = ESCALAS.get(parametro, {"min": 0, "max": 100})
+        coords = graf["coords"]
+        plot_w = graf["plot_width"]
+        plot_h = graf["plot_height"]
 
-            except Exception as e:
-                log.warning(f"  Erro processando API response: {e}")
+        if plot_w <= 0 or plot_h <= 0:
+            log.warning(f"  {parametro}: dimensoes invalidas {plot_w}x{plot_h}")
+            continue
 
-    # 3. Processar dados de SVG (se nao tiver dados de API)
-    graficos = resultado_js.get("graficos", {})
-    if graficos and not coleta["series"]:
-        log.info(f"Processando {len(graficos)} graficos SVG...")
-        for key, grafico in graficos.items():
-            fonte = grafico.get("fonte", "svg")
+        # Tentar calibrar eixo Y com os textos do eixo
+        y_min_val = escala["min"]
+        y_max_val = escala["max"]
 
-            if fonte == "angular_scope" or fonte == "angular_scope_items":
-                # Dados do Angular - ja estruturados
-                dados_brutos = grafico.get("dados", [])
-                serie = []
-                for item in dados_brutos:
-                    ts = item.get("Timestamp", item.get("timestamp",
-                         item.get("t", item.get("Time", ""))))
-                    val = item.get("Value", item.get("value",
-                          item.get("v", item.get("y", None))))
-                    if isinstance(val, dict):
-                        val = val.get("Value", None)
-                    if ts and val is not None:
-                        try:
-                            serie.append({"t": str(ts), "v": float(val)})
-                        except:
-                            pass
-                if serie:
-                    coleta["series"][key] = {
-                        "fonte": fonte,
-                        "num_pontos": len(serie),
-                        "dados": serie
-                    }
-                    log.info(f"  Serie Angular '{key}': {len(serie)} pontos")
+        # Procurar eixo Y correspondente a este SVG
+        for eixo in eixos_y:
+            if eixo["svg_idx"] == graf["svg_idx"]:
+                vals = [v["val"] for v in eixo["valores"]]
+                if vals:
+                    y_min_val = min(vals)
+                    y_max_val = max(vals)
+                    log.info(f"  {parametro}: eixo Y calibrado {y_min_val}-{y_max_val}")
+                break
 
-            elif "coordenadas" in grafico:
-                # Dados SVG - coordenadas de pixel (precisa converter)
-                coords = grafico["coordenadas"]
-                coleta["series"][key] = {
-                    "fonte": "svg_coordenadas",
-                    "cor": grafico.get("cor", ""),
-                    "num_pontos": len(coords),
-                    "svg_width": grafico.get("svg_width", 0),
-                    "svg_height": grafico.get("svg_height", 0),
-                    "coordenadas_pixel": coords[:1000]  # limitar
-                }
-                log.info(f"  Serie SVG '{key}': {len(coords)} pontos (cor={grafico.get('cor', '')})")
+        # Converter coordenadas de pixel para valores reais
+        serie = []
+        for coord in coords:
+            px = coord["px"]
+            py = coord["py"]
+
+            # X -> tempo (px=0 = inicio, px=plot_w = fim)
+            frac_x = px / plot_w if plot_w > 0 else 0
+            frac_x = max(0, min(1, frac_x))
+            ts = tempo_inicio + timedelta(seconds=frac_x * duracao_total)
+
+            # Y -> valor (py=0 = topo = max, py=plot_h = base = min)
+            # Em SVG, Y cresce pra baixo
+            frac_y = 1.0 - (py / plot_h) if plot_h > 0 else 0
+            frac_y = max(0, min(1, frac_y))
+            valor = y_min_val + frac_y * (y_max_val - y_min_val)
+
+            serie.append({
+                "t": ts.isoformat(),
+                "v": round(valor, 4)
+            })
+
+        # Ordenar por tempo
+        serie.sort(key=lambda d: d["t"])
+
+        # Remover duplicatas (mesmo timestamp)
+        seen = set()
+        serie_unica = []
+        for d in serie:
+            key = d["t"][:16]  # precisao de minuto
+            if key not in seen:
+                seen.add(key)
+                serie_unica.append(d)
+
+        coleta["series"][parametro] = {
+            "num_pontos": len(serie_unica),
+            "cor_svg": cor,
+            "escala_y": {"min": y_min_val, "max": y_max_val},
+            "dados": serie_unica
+        }
+
+        # Valor atual = ultimo ponto
+        if serie_unica:
+            coleta["valores_atuais"][parametro] = serie_unica[-1]["v"]
+
+        log.info(f"  {parametro}: {len(serie_unica)} pontos, "
+                 f"ultimo={serie_unica[-1]['v'] if serie_unica else 'N/A'}")
+
+    # Valores de texto (complementar)
+    log.info("Valores de texto na tela:")
+    for v in valores_texto:
+        log.info(f"  '{v['texto']}' val={v['valor']} pos=({v['x']:.0f},{v['y']:.0f}) "
+                 f"fontSize={v['fontSize']} color={v['color']}")
 
     return coleta
-
-
-def identificar_parametro(nome, url):
-    """Identifica qual parametro (cloro/cor/turbidez/ph) baseado no nome."""
-    texto = f"{nome} {url}".lower()
-
-    if "cloro" in texto or "cl2" in texto or "residual" in texto:
-        return "cloro_ppm"
-    elif "cor" in texto and "corpo" not in texto:
-        return "cor_uc"
-    elif "turb" in texto or "ntu" in texto:
-        return "turbidez_ntu"
-    elif "ph" in texto:
-        return "ph"
-    else:
-        return f"param_{nome[:20]}"
 
 
 def salvar(coleta):
@@ -585,7 +445,7 @@ def salvar(coleta):
 
     historico.append(coleta)
 
-    # Manter ultimos 30 dias (360 coletas de 2h)
+    # Manter ultimos 30 dias (~360 coletas de 2h)
     if len(historico) > 360:
         historico = historico[-360:]
 
@@ -593,6 +453,13 @@ def salvar(coleta):
         json.dump(historico, f, indent=2, ensure_ascii=False)
 
     log.info(f"Salvo. Total de coletas: {len(historico)}")
+
+    # Stats
+    total_pontos = sum(
+        s.get("num_pontos", 0)
+        for s in coleta.get("series", {}).values()
+    )
+    log.info(f"Total de pontos nesta coleta: {total_pontos}")
 
 
 if __name__ == "__main__":
