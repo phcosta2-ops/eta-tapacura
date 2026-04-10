@@ -1,24 +1,30 @@
 """
 =============================================================
-COLETOR ETA TAPACURA - V4 (CALIBRACAO REFINADA)
+COLETOR ETA TAPACURA - V5 (CALIBRACAO PRECISA)
 =============================================================
-Corrige a conversao pixel->valor para graficos onde os valores
-ficam perto do fundo (Cor escala 0-250 com valor ~6,
-Turbidez escala 0-20 com valor ~0.4).
+Melhoria principal: usa regressao linear com TODOS os ticks
+do eixo Y (least squares), nao so primeiro e ultimo.
+Pra Cor e Turbidez que ficam perto do fundo do grafico,
+aplica offset baseado no valor real mantendo a variacao
+relativa da curva.
 
-O problema: em SVG, py=0 = topo (valor maximo), py=ph = fundo
-(valor minimo). Mas o plot area tem padding/margem interna,
-entao py nunca chega exatamente a 0 ou ph.
+Cores GRAFICOS (trace-line):
+  rgb(224,138,0)   = Cloro (ppm)
+  rgb(255,240,0)   = Cor (uC)
+  rgb(60,191,60)   = Turbidez (NTU)
+  rgb(178,107,255) = pH
 
-Solucao: usar os ticks do eixo Y (que tambem sao posicionados
-em pixels) pra fazer uma calibracao precisa pixel<->valor.
+Cores TEXTOS (fontSize=80px):
+  rgb(255,127,39)  = Cloro
+  rgb(255,240,0)   = Cor
+  rgb(34,177,76)   = Turbidez
+  rgb(163,73,164)  = pH
 =============================================================
 """
 
 import json
 import os
 import sys
-import time
 import logging
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -80,13 +86,6 @@ JS_EXTRAIR = """
 
     const svgs = document.querySelectorAll('svg');
 
-    // Primeiro, coletar informacoes de TODOS os SVGs
-    const svgInfos = [];
-    svgs.forEach((svg, idx) => {
-        const bbox = svg.getBoundingClientRect();
-        svgInfos.push({ idx, bbox, svg });
-    });
-
     // Coletar graficos (trace-lines)
     svgs.forEach((svg, idx) => {
         const bbox = svg.getBoundingClientRect();
@@ -125,50 +124,39 @@ JS_EXTRAIR = """
         });
     });
 
-    // Coletar eixos Y com posicao PRECISA dos ticks em pixels
-    // Os ticks do eixo Y sao linhas horizontais (gridlines) ou textos
-    // posicionados em Y especificos dentro do SVG do eixo
+    // Coletar eixos Y - posicao PRECISA dos ticks
     svgs.forEach((svg, idx) => {
         const bbox = svg.getBoundingClientRect();
-        // Eixo Y: estreito e alto
-        if (bbox.width > 50 || bbox.height < 80) return;
+        if (bbox.width > 60 || bbox.height < 80) return;
 
         const textos = svg.querySelectorAll('text');
         const vals = [];
         textos.forEach(t => {
             const v = parseFloat((t.textContent || '').trim().replace(',', '.'));
             if (!isNaN(v)) {
-                // Posicao Y do texto DENTRO do SVG (usar transform ou posicao)
                 const tb = t.getBoundingClientRect();
-
-                // Posicao relativa ao SVG do eixo
-                const relY = tb.y - bbox.y + tb.height / 2;
-
-                // Tambem pegar a posicao absoluta pra mapear pro SVG do grafico
                 vals.push({
                     val: v,
-                    absY: tb.y + tb.height / 2,  // centro do texto na tela
-                    relY: relY,
-                    svgY: bbox.y
+                    absY: tb.y + tb.height / 2
                 });
             }
         });
 
         if (vals.length >= 2) {
-            vals.sort((a, b) => a.absY - b.absY);  // topo pra baixo
+            vals.sort((a, b) => a.absY - b.absY);
             R.eixos.push({
                 svg_idx: idx,
-                bbox_x: bbox.x, bbox_y: bbox.y,
-                bbox_w: bbox.width, bbox_h: bbox.height,
+                bbox_y: bbox.y, bbox_h: bbox.height,
                 valores: vals
             });
             R.debug.push('eixoY svg' + idx + ' y=' + bbox.y.toFixed(0) +
                 ' h=' + bbox.height.toFixed(0) +
-                ' vals=[' + vals.map(v => v.val + '@' + v.absY.toFixed(0)).join(', ') + ']');
+                ' n=' + vals.length +
+                ' range=' + vals[0].val + '-' + vals[vals.length-1].val);
         }
     });
 
-    // Textos grandes (valores atuais)
+    // Textos grandes (fontSize >= 40px)
     const all = document.querySelectorAll('*');
     all.forEach(el => {
         if (el.children.length > 2) return;
@@ -195,13 +183,11 @@ JS_EXTRAIR = """
 """
 
 
-def cor_match(cor1, cor2):
-    """Compara duas cores RGB ignorando espacos."""
-    return cor1.replace(" ", "") == cor2.replace(" ", "")
+def cor_match(c1, c2):
+    return c1.replace(" ", "") == c2.replace(" ", "")
 
 
 def cor_para_param(cor, mapa):
-    """Busca parametro pela cor."""
     cor = cor.strip()
     if cor in mapa:
         return mapa[cor]
@@ -211,9 +197,75 @@ def cor_para_param(cor, mapa):
     return None
 
 
+def least_squares_fit(points):
+    """
+    Regressao linear por minimos quadrados.
+    points = [(x, y), ...]
+    Retorna (a, b) onde y = a*x + b
+    """
+    n = len(points)
+    if n < 2:
+        return None, None
+
+    sx = sum(p[0] for p in points)
+    sy = sum(p[1] for p in points)
+    sxx = sum(p[0]**2 for p in points)
+    sxy = sum(p[0]*p[1] for p in points)
+
+    denom = n * sxx - sx * sx
+    if abs(denom) < 1e-10:
+        return None, None
+
+    a = (n * sxy - sx * sy) / denom
+    b = (sy - a * sx) / n
+
+    return a, b
+
+
+def construir_mapa_pixel_valor(eixo, graf):
+    """
+    Mapeia pixel Y (viewBox) -> valor usando TODOS os ticks do eixo Y
+    com regressao por minimos quadrados.
+    """
+    vals = eixo["valores"]
+    if len(vals) < 2:
+        return None
+
+    graf_top = graf["bbox_y"]
+    graf_h_screen = graf["bbox_h"]
+    vb_h = graf["ph"]
+
+    if graf_h_screen <= 0:
+        return None
+
+    scale = vb_h / graf_h_screen
+
+    # Converter ticks de coordenada absoluta pra viewBox do grafico
+    points = []
+    for v in vals:
+        rel_screen = v["absY"] - graf_top
+        vb_y = rel_screen * scale
+        points.append((vb_y, v["val"]))
+
+    # Least squares: val = a * vb_y + b
+    a, b = least_squares_fit(points)
+    if a is None:
+        return None
+
+    # Calcular erro medio dos ticks (pra log)
+    erros = [abs(a * p[0] + b - p[1]) for p in points]
+    erro_medio = sum(erros) / len(erros)
+
+    return {"a": a, "b": b, "n_ticks": len(points), "erro_medio": erro_medio}
+
+
+def pixel_para_valor(py, mapa):
+    return mapa["a"] * py + mapa["b"]
+
+
 def coletar():
     log.info("=" * 60)
-    log.info("COLETA V4 - ETA TAPACURA (CALIBRACAO REFINADA)")
+    log.info("COLETA V5 - ETA TAPACURA (CALIBRACAO PRECISA)")
     log.info("=" * 60)
 
     Path("dados").mkdir(exist_ok=True)
@@ -249,8 +301,8 @@ def coletar():
                     pass_f.press("Enter")
                 page.wait_for_timeout(8000)
 
-            log.info("Aguardando graficos (15s)...")
-            page.wait_for_timeout(15000)
+            log.info("Aguardando graficos (18s)...")
+            page.wait_for_timeout(18000)
 
             page.screenshot(path=ARQUIVO_SCREENSHOT, full_page=True)
             log.info("Screenshot salvo")
@@ -263,10 +315,15 @@ def coletar():
 
             coleta = processar(R)
 
+            # Salvar debug (sem coords pra economizar)
             try:
                 with open(ARQUIVO_DEBUG, "w", encoding="utf-8") as f:
                     debug_data = {
-                        "graficos": [{**g, "coords": f"[{g['n']} pontos]"} for g in R["graficos"]],
+                        "graficos": [{
+                            "svg_idx": g["svg_idx"], "cor": g["cor"],
+                            "n": g["n"], "pw": g["pw"], "ph": g["ph"],
+                            "bbox_y": g["bbox_y"], "bbox_h": g["bbox_h"]
+                        } for g in R["graficos"]],
                         "eixos": R["eixos"],
                         "textos": R["textos"],
                         "debug": R["debug"]
@@ -292,68 +349,6 @@ def coletar():
     log.info("COLETA FINALIZADA")
 
 
-def construir_mapa_pixel_valor(eixo, graf):
-    """
-    Constroi uma funcao de mapeamento pixel Y -> valor
-    usando os ticks do eixo Y e a posicao do grafico na tela.
-
-    Os ticks do eixo Y estao em coordenadas absolutas (tela).
-    O grafico SVG tambem tem coordenadas absolutas (bbox).
-    Precisamos converter os ticks pra coordenadas do viewBox do SVG.
-    """
-    vals = eixo["valores"]  # [{val, absY}, ...]
-    if len(vals) < 2:
-        return None
-
-    # O grafico e o eixo compartilham a mesma faixa vertical na tela
-    # absY do tick -> posicao relativa no grafico
-    graf_top = graf["bbox_y"]       # Y absoluto do topo do SVG do grafico
-    graf_bottom = graf["bbox_y"] + graf["bbox_h"]  # Y absoluto do fundo
-    graf_h_screen = graf["bbox_h"]  # altura na tela
-
-    # Proporcao tela -> viewBox
-    vb_h = graf["ph"]  # altura do viewBox
-    scale = vb_h / graf_h_screen if graf_h_screen > 0 else 1
-
-    # Converter cada tick pra coordenada do viewBox
-    ticks = []
-    for v in vals:
-        # Posicao do tick na tela -> posicao relativa no SVG
-        rel_screen = v["absY"] - graf_top
-        # Converter pra viewBox
-        vb_y = rel_screen * scale
-        ticks.append({"val": v["val"], "vb_y": vb_y})
-
-    # Ordenar por vb_y (topo pra baixo = valor maior pra menor)
-    ticks.sort(key=lambda t: t["vb_y"])
-
-    # Precisamos de pelo menos 2 ticks pra interpolar
-    if len(ticks) < 2:
-        return None
-
-    # Regressao linear: val = a * vb_y + b
-    # Usar primeiro e ultimo tick
-    t_top = ticks[0]      # menor vb_y = topo = maior valor
-    t_bot = ticks[-1]     # maior vb_y = fundo = menor valor
-
-    dy = t_bot["vb_y"] - t_top["vb_y"]
-    dv = t_bot["val"] - t_top["val"]
-
-    if abs(dy) < 0.001:
-        return None
-
-    # a = dv/dy (negativo: y cresce pra baixo, valor diminui)
-    a = dv / dy
-    b = t_top["val"] - a * t_top["vb_y"]
-
-    return {"a": a, "b": b, "ticks": ticks}
-
-
-def pixel_para_valor(py, mapa):
-    """Converte coordenada Y do viewBox pra valor real."""
-    return mapa["a"] * py + mapa["b"]
-
-
 def processar(R):
     agora = datetime.now()
     coleta = {
@@ -376,12 +371,12 @@ def processar(R):
             coleta["valores_atuais"][param] = t["valor"]
             log.info(f"  Texto: {param} = {t['valor']}")
 
-    # 2. Tempo: 8h
+    # 2. Tempo: 8h (padrao PI Vision)
     tempo_fim = agora
     tempo_inicio = agora - timedelta(hours=8)
     duracao = 8 * 3600
 
-    # 3. Associar cada grafico ao eixo Y mais proximo
+    # 3. Processar cada grafico
     for graf in sorted(graficos, key=lambda g: g["svg_idx"]):
         cor = graf["cor"].strip()
         param = cor_para_param(cor, CORES_GRAFICOS)
@@ -395,42 +390,34 @@ def processar(R):
         if pw <= 0 or ph <= 0:
             continue
 
-        # Encontrar eixo Y adjacente (svg_idx mais proximo, antes do grafico)
+        # Encontrar eixo Y adjacente (1-3 SVGs antes)
         melhor_eixo = None
         melhor_dist = float('inf')
         for eixo in eixos:
             dist = graf["svg_idx"] - eixo["svg_idx"]
-            # Eixo deve estar 1-3 SVGs antes do grafico
             if 0 < dist <= 3 and dist < melhor_dist:
                 melhor_dist = dist
                 melhor_eixo = eixo
 
-        # Construir mapa de calibracao pixel->valor
+        # Calibracao pixel->valor
         mapa_pv = None
         if melhor_eixo:
             mapa_pv = construir_mapa_pixel_valor(melhor_eixo, graf)
             if mapa_pv:
-                # Validar com os ticks
-                ticks = mapa_pv["ticks"]
-                t0 = ticks[0]
-                t1 = ticks[-1]
-                log.info(f"  {param}: calibracao por ticks: "
-                         f"py={t0['vb_y']:.1f}->val={t0['val']}, "
-                         f"py={t1['vb_y']:.1f}->val={t1['val']}")
+                log.info(f"  {param}: calibracao least-squares com "
+                         f"{mapa_pv['n_ticks']} ticks, "
+                         f"erro_medio={mapa_pv['erro_medio']:.4f}")
 
         # Converter coordenadas
         serie = []
         for coord in coords:
-            # X -> tempo
             frac_x = coord["px"] / pw if pw > 0 else 0
             frac_x = max(0, min(1, frac_x))
             ts = tempo_inicio + timedelta(seconds=frac_x * duracao)
 
-            # Y -> valor
             if mapa_pv:
                 valor = pixel_para_valor(coord["py"], mapa_pv)
             else:
-                # Fallback: escala simples
                 escala = ESCALAS_FALLBACK[param]
                 frac_y = 1.0 - (coord["py"] / ph) if ph > 0 else 0
                 frac_y = max(0, min(1, frac_y))
@@ -452,43 +439,47 @@ def processar(R):
                 seen.add(k)
                 serie_unica.append(d)
 
+        if not serie_unica:
+            continue
+
         # Validar com valor real
         valor_real = valores_reais.get(param)
-        ultimo_calc = serie_unica[-1]["v"] if serie_unica else None
-        erro = abs(ultimo_calc - valor_real) if (ultimo_calc is not None and valor_real is not None) else None
+        ultimo_calc = serie_unica[-1]["v"]
+        erro = abs(ultimo_calc - valor_real) if valor_real is not None else None
 
-        uc_str = f"{ultimo_calc:.4f}" if ultimo_calc is not None else "N/A"
-        er_str = f"{erro:.4f}" if erro is not None else "N/A"
-        log.info(f"  {param}: {len(serie_unica)} pontos, "
-                 f"ultimo_calc={uc_str}, real={valor_real}, erro={er_str}")
+        log.info(f"  {param}: {len(serie_unica)} pts, "
+                 f"calc={ultimo_calc:.4f}, real={valor_real}, "
+                 f"erro={erro:.4f}" if erro is not None else
+                 f"  {param}: {len(serie_unica)} pts, calc={ultimo_calc:.4f}")
 
-        # Se o erro for grande, corrigir usando o valor real como ancora
-        if erro is not None and valor_real is not None and ultimo_calc is not None:
-            if erro > 0.3:
-                corrigido = False
+        # Correcao inteligente quando erro > 0.3
+        if erro is not None and valor_real is not None and erro > 0.3:
+            # SEMPRE usar offset pra manter a variacao relativa da curva
+            # O offset preserva a forma (picos, vales, tendencias) enquanto
+            # desloca pra posicao correta. Fator multiplicativo distorce
+            # a forma quando valores sao muito pequenos (ex: turbidez ~0.4)
+            offset = valor_real - ultimo_calc
+            log.info(f"  {param}: correcao offset={offset:.4f}")
+            serie_unica = [{"t": d["t"], "v": round(d["v"] + offset, 4)}
+                          for d in serie_unica]
 
-                # Tentar fator proporcional (funciona quando a escala ta certa mas com offset)
-                # So usar fator se ambos tem o mesmo sinal e o fator e razoavel
-                if abs(ultimo_calc) > 0.01 and ultimo_calc > 0 and valor_real > 0:
-                    fator = valor_real / ultimo_calc
-                    if 0.3 < fator < 10:
-                        log.info(f"  {param}: aplicando fator={fator:.4f}")
-                        serie_unica = [{"t": d["t"], "v": round(d["v"] * fator, 4)} for d in serie_unica]
-                        corrigido = True
+            # Verificar se a correcao criou valores negativos absurdos
+            # (pode acontecer se a calibracao esta muito off)
+            min_val = min(d["v"] for d in serie_unica)
+            if min_val < -1:
+                # A calibracao ta muito ruim, os dados SVG nao sao confiaveis
+                # Manter so o valor atual como ponto unico
+                log.warning(f"  {param}: valores negativos apos offset "
+                           f"(min={min_val:.2f}), mantendo so valor atual")
+                serie_unica = [{"t": agora.strftime("%Y-%m-%dT%H:%M:%S"),
+                               "v": valor_real}]
 
-                # Se fator nao funcionou (valor negativo, fator fora do range, etc)
-                # usar offset: desloca toda a serie pra que o ultimo ponto bata
-                if not corrigido:
-                    offset = valor_real - ultimo_calc
-                    log.info(f"  {param}: aplicando offset={offset:.4f}")
-                    serie_unica = [{"t": d["t"], "v": round(d["v"] + offset, 4)} for d in serie_unica]
-
-                ultimo_final = serie_unica[-1]["v"] if serie_unica else None
-                uf_str = f"{ultimo_final:.4f}" if ultimo_final is not None else "N/A"
-                log.info(f"  {param}: apos correcao, ultimo={uf_str}")
+            ultimo_final = serie_unica[-1]["v"]
+            log.info(f"  {param}: apos correcao, ultimo={ultimo_final:.4f}")
 
         coleta["series"][param] = {
             "num_pontos": len(serie_unica),
+            "cor_svg": cor,
             "dados": serie_unica
         }
 
