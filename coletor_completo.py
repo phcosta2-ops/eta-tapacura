@@ -399,14 +399,72 @@ def processar(R):
                 melhor_dist = dist
                 melhor_eixo = eixo
 
-        # Calibracao pixel->valor
+        # === CALIBRACAO EM 2 ETAPAS ===
+        #
+        # Etapa 1: Calibracao pelos ticks do eixo Y (least squares)
+        # Isso da uma boa estimativa, mas pode ter erro significativo
+        # pra valores perto do fundo (Cor, Turbidez)
+        #
+        # Etapa 2: Se temos o valor real (texto grande), recalibrar
+        # usando 2 ancoras no espaco viewBox:
+        #   - Ancora 1: ultimo ponto do trace (px maximo) → valor real
+        #   - Ancora 2: tick de valor 0 do eixo Y → valor 0
+        # Isso cria um mapeamento perfeito pra toda a faixa de valores
+
         mapa_pv = None
         if melhor_eixo:
             mapa_pv = construir_mapa_pixel_valor(melhor_eixo, graf)
             if mapa_pv:
-                log.info(f"  {param}: calibracao least-squares com "
+                log.info(f"  {param}: calibracao ticks: "
                          f"{mapa_pv['n_ticks']} ticks, "
                          f"erro_medio={mapa_pv['erro_medio']:.4f}")
+
+        # Tentar recalibrar usando valor real + tick zero
+        valor_real = valores_reais.get(param)
+        mapa_recal = None
+
+        if valor_real is not None and melhor_eixo and valor_real > 0.001:
+            # Encontrar o tick de valor 0 no eixo
+            tick_zero = None
+            for v in melhor_eixo["valores"]:
+                if v["val"] == 0:
+                    tick_zero = v
+                    break
+
+            # Ultimo ponto do trace (maior px = mais recente)
+            ultimo_pt = max(coords, key=lambda c: c["px"])
+
+            if tick_zero is not None:
+                # Converter posicoes pra viewBox
+                graf_top = graf["bbox_y"]
+                graf_h_screen = graf["bbox_h"]
+                vb_h = graf["ph"]
+                scale = vb_h / graf_h_screen if graf_h_screen > 0 else 1
+
+                # Posicao do tick zero no viewBox
+                zero_screen = tick_zero["absY"] - graf_top
+                zero_vb = zero_screen * scale
+
+                # Posicao do ultimo ponto (ja esta no viewBox)
+                ultimo_vb = ultimo_pt["py"]
+
+                # 2 pontos: (zero_vb, 0) e (ultimo_vb, valor_real)
+                dy = ultimo_vb - zero_vb
+                if abs(dy) > 0.5:
+                    a_recal = (valor_real - 0) / dy
+                    b_recal = 0 - a_recal * zero_vb
+                    mapa_recal = {"a": a_recal, "b": b_recal}
+
+                    # Validar: o valor no tick zero deve ser ~0
+                    val_at_zero = a_recal * zero_vb + b_recal
+                    val_at_ultimo = a_recal * ultimo_vb + b_recal
+
+                    log.info(f"  {param}: RECALIBRADO com valor real: "
+                             f"zero_vb={zero_vb:.1f}->val={val_at_zero:.2f}, "
+                             f"ultimo_vb={ultimo_vb:.1f}->val={val_at_ultimo:.2f}")
+
+        # Escolher melhor mapa
+        mapa_final = mapa_recal if mapa_recal else mapa_pv
 
         # Converter coordenadas
         serie = []
@@ -415,8 +473,8 @@ def processar(R):
             frac_x = max(0, min(1, frac_x))
             ts = tempo_inicio + timedelta(seconds=frac_x * duracao)
 
-            if mapa_pv:
-                valor = pixel_para_valor(coord["py"], mapa_pv)
+            if mapa_final:
+                valor = mapa_final["a"] * coord["py"] + mapa_final["b"]
             else:
                 escala = ESCALAS_FALLBACK[param]
                 frac_y = 1.0 - (coord["py"] / ph) if ph > 0 else 0
@@ -442,40 +500,21 @@ def processar(R):
         if not serie_unica:
             continue
 
-        # Validar com valor real
-        valor_real = valores_reais.get(param)
+        # Log final
         ultimo_calc = serie_unica[-1]["v"]
         erro = abs(ultimo_calc - valor_real) if valor_real is not None else None
-
+        erro_str = f", erro={erro:.4f}" if erro is not None else ""
         log.info(f"  {param}: {len(serie_unica)} pts, "
-                 f"calc={ultimo_calc:.4f}, real={valor_real}, "
-                 f"erro={erro:.4f}" if erro is not None else
-                 f"  {param}: {len(serie_unica)} pts, calc={ultimo_calc:.4f}")
+                 f"ultimo={ultimo_calc:.4f}, real={valor_real}{erro_str}")
 
-        # Correcao inteligente quando erro > 0.3
-        if erro is not None and valor_real is not None and erro > 0.3:
-            # SEMPRE usar offset pra manter a variacao relativa da curva
-            # O offset preserva a forma (picos, vales, tendencias) enquanto
-            # desloca pra posicao correta. Fator multiplicativo distorce
-            # a forma quando valores sao muito pequenos (ex: turbidez ~0.4)
-            offset = valor_real - ultimo_calc
-            log.info(f"  {param}: correcao offset={offset:.4f}")
-            serie_unica = [{"t": d["t"], "v": round(d["v"] + offset, 4)}
-                          for d in serie_unica]
-
-            # Verificar se a correcao criou valores negativos absurdos
-            # (pode acontecer se a calibracao esta muito off)
-            min_val = min(d["v"] for d in serie_unica)
-            if min_val < -1:
-                # A calibracao ta muito ruim, os dados SVG nao sao confiaveis
-                # Manter so o valor atual como ponto unico
-                log.warning(f"  {param}: valores negativos apos offset "
-                           f"(min={min_val:.2f}), mantendo so valor atual")
-                serie_unica = [{"t": agora.strftime("%Y-%m-%dT%H:%M:%S"),
-                               "v": valor_real}]
-
-            ultimo_final = serie_unica[-1]["v"]
-            log.info(f"  {param}: apos correcao, ultimo={ultimo_final:.4f}")
+        # Sanity check: se ainda tem valores muito negativos, a calibracao falhou
+        min_val = min(d["v"] for d in serie_unica)
+        max_val = max(d["v"] for d in serie_unica)
+        if min_val < -5:
+            log.warning(f"  {param}: min={min_val:.2f} muito negativo, "
+                       f"mantendo so valor atual")
+            serie_unica = [{"t": agora.strftime("%Y-%m-%dT%H:%M:%S"),
+                           "v": valor_real if valor_real else 0}]
 
         coleta["series"][param] = {
             "num_pontos": len(serie_unica),
