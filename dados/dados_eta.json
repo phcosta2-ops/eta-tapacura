@@ -108490,5 +108490,11 @@
         ]
       }
     }
+  },
+  {
+    "timestamp": "2026-04-11T14:09:22.994718",
+    "tipo": "erro",
+    "erro": "Page.goto: Timeout 60000ms exceeded.\nCall log:\n  - navigating to \"https://supervisorio.compesa.com.br/PIVision/#/Displays/704/ETA-TAPACURA--INSTRUMENTACAO-ANALITICA?hidetoolbar&hidesidebar\", waiting until \"networkidle\"\n",
+    "series": {}
   }
 ]
